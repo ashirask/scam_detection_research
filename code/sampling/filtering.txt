@@ -1,0 +1,7 @@
+from transformers import pipeline
+
+classifier = pipeline("text-classification", model="unitary/unbiased-toxic-roberta")
+
+def is_sexual(text):
+    result = classifier(text)[0]
+    return result["label"] == "sexual" and result["score"] > 0.7
