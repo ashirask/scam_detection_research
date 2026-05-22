@@ -33,14 +33,18 @@ sampled_data/
 output/
 code/output/
 code/other_metrics/output/
+code/ref_code
 *.jsonl
 *.zst
 *.tar.gz
+*.png
+*.sh
 
 # Large data files
 *.csv
 *.parquet
 *.hdf5
+*.txt
 
 # HPC/SLURM - IGNORE ALL SLURM FILES
 *.slurm
@@ -64,3 +68,7 @@ code/other_metrics/output/
 
 # Separate projects (not part of scam detection)
 twit-22/
+code/README_SESSION_SUMMARY.md
+code/other_metrics/code/co-URL/detect_url_sharing_two_stage.py
+code/other_metrics/code/co-URL/UPDATE_SUMMARY.md
+code/other_metrics/code/co-URL/INSTRUCTIONS.md
