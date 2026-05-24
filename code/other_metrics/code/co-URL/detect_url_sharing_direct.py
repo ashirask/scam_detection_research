@@ -58,6 +58,26 @@ def normalize_url(url):
         return url
 
 
+def extract_domain(url):
+    """Extract a comparable domain from a URL."""
+    try:
+        p = urlparse(url)
+        netloc = (p.netloc or '').lower()
+        if netloc.startswith('www.'):
+            netloc = netloc[4:]
+        return netloc
+    except Exception:
+        return ''
+
+
+def is_excluded_domain(url, excluded_domains):
+    """Check whether a URL belongs to one of the excluded domains."""
+    if not url:
+        return False
+    domain = extract_domain(url)
+    return domain in excluded_domains
+
+
 def build_post_text(post):
     """Build readable post text from title and selftext."""
     title = (post.get('title') or '').strip()
@@ -75,11 +95,13 @@ def truncate_text(text, limit=300):
     return compact if len(compact) <= limit else compact[: limit - 3] + '...'
 
 
-def load_posts_data(filepath, post_mode='domain'):
+def load_posts_data(filepath, post_mode='domain', excluded_domains=None):
     """Load post-derived features and metadata."""
+    excluded_domains = set(excluded_domains or [])
     author_tokens = defaultdict(list)
     author_metadata = defaultdict(list)
     author_sources = defaultdict(list)
+    processed_count = 0
 
     print(f"Loading posts data from {filepath}...")
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -108,8 +130,12 @@ def load_posts_data(filepath, post_mode='domain'):
                         tok = token.strip().lower()
                         if tok.startswith('www.'):
                             tok = tok[4:]
+                        if tok in excluded_domains:
+                            continue
                     else:
-                        tok = normalize_url(token.strip())
+                        tok = token.strip()
+                        if is_excluded_domain(tok, excluded_domains):
+                            continue
 
                     source_url = post.get('url_overridden_by_dest') or post.get('url') or ''
                     source_text = build_post_text(post)
@@ -135,38 +161,41 @@ def load_posts_data(filepath, post_mode='domain'):
                     # also extract URLs from title/selftext and add normalized versions
                     post_text_urls = extract_urls_from_text(source_text)
                     for u in post_text_urls:
-                        try:
-                            norm = normalize_url(u.strip())
-                        except Exception:
-                            norm = u.strip()
-                        # skip if this normalized URL equals the main token for this post
-                        if not norm or norm == tok:
+                        raw_url = u.strip()
+                        if not raw_url:
                             continue
-                        author_tokens[author].append(norm)
+                        if is_excluded_domain(raw_url, excluded_domains):
+                            continue
+                        if raw_url == tok:
+                            continue
+                        author_tokens[author].append(raw_url)
                         author_metadata[author].append({
-                            'feature': norm,
+                            'feature': raw_url,
                             'feature_type': 'full_url_in_text',
                             'subreddit': post.get('subreddit', 'N/A'),
                             'domain': post.get('domain', 'N/A'),
                             'post_hint': post.get('post_hint', 'N/A'),
-                            'url_overridden_by_dest': norm
+                            'url_overridden_by_dest': raw_url
                         })
 
-                if (i + 1) % 10000 == 0:
-                    print(f"  Processed {i + 1} posts...")
+                processed_count = i + 1
+                if processed_count % 10000 == 0:
+                    print(f"  Processed {processed_count} posts...")
 
             except (json.JSONDecodeError, KeyError, TypeError):
                 continue
 
-    print(f"  Total posts processed: {i + 1}")
+    print(f"  Total posts processed: {processed_count}")
     return author_tokens, author_metadata, author_sources
 
 
-def load_comments_data(filepath):
+def load_comments_data(filepath, excluded_domains=None):
     """Load URLs extracted from comment body text."""
+    excluded_domains = set(excluded_domains or [])
     author_tokens = defaultdict(list)
     author_metadata = defaultdict(list)
     author_sources = defaultdict(list)
+    processed_count = 0
 
     print(f"Loading comments data from {filepath}...")
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -184,7 +213,9 @@ def load_comments_data(filepath):
                     author = comment['author']
                     body = comment.get('body', '')
                     for url in urls:
-                        token = normalize_url(url.strip())
+                        token = url.strip()
+                        if not token or is_excluded_domain(token, excluded_domains):
+                            continue
                         author_tokens[author].append(token)
                         author_metadata[author].append({
                             'feature': token,
@@ -203,13 +234,14 @@ def load_comments_data(filepath):
                         'post_hint': 'comment_text'
                     })
 
-                if (i + 1) % 10000 == 0:
-                    print(f"  Processed {i + 1} comments...")
+                processed_count = i + 1
+                if processed_count % 10000 == 0:
+                    print(f"  Processed {processed_count} comments...")
 
             except (json.JSONDecodeError, KeyError, TypeError):
                 continue
 
-    print(f"  Total comments processed: {i + 1}")
+    print(f"  Total comments processed: {processed_count}")
     return author_tokens, author_metadata, author_sources
 
 
@@ -244,6 +276,23 @@ def filter_authors(author_tokens, min_tokens=2, count_mode='unique'):
     print(f"  Authors removed: {removed}")
 
     return filtered
+
+
+def filter_authors_by_tfidf_features(author_list, tfidf_matrix, min_features=2):
+    """Remove authors that have fewer than min_features non-zero TF-IDF features."""
+    feature_counts = np.diff(tfidf_matrix.indptr)
+    keep_mask = feature_counts >= min_features
+
+    kept_authors = [author for author, keep in zip(author_list, keep_mask) if keep]
+    filtered_matrix = tfidf_matrix[keep_mask]
+
+    removed = len(author_list) - len(kept_authors)
+    print(f"\nFiltering authors with < {min_features} non-zero TF-IDF features...")
+    print(f"  Authors before TF-IDF pruning filter: {len(author_list)}")
+    print(f"  Authors kept after TF-IDF pruning filter: {len(kept_authors)}")
+    print(f"  Authors removed after TF-IDF pruning filter: {removed}")
+
+    return kept_authors, filtered_matrix
 
 
 def build_author_matrix(author_tokens_list, min_df=2, max_df=0.9):
@@ -486,9 +535,15 @@ def main():
                         help='Minimum document frequency for TF-IDF tokens (int or float)')
     parser.add_argument('--max-df', type=parse_df_value, default=0.9,
                         help='Maximum document frequency for TF-IDF tokens (int or float)')
+    parser.add_argument(
+        '--exclude-domain',
+        action='append',
+        default=['i.imgur.com', 'api.redgifs.com', 'external-preview.redd.it', 'reddit.com', 'v.redd.it', 'i.redd.it','redgifs.com'],
+        help='Domain to exclude before author token counting; can be repeated.'
+    )
     parser.add_argument('--null-method', choices=['observed', 'sampled_pairs'], default='sampled_pairs',
                         help="How to derive threshold: 'observed' uses all pairs; 'sampled_pairs' samples observed pairs")
-    parser.add_argument('--sample-size', type=int, default=500,
+    parser.add_argument('--sample-size', type=int, default=1000,
                         help='Number of observed pairs to sample when --null-method is sampled_pairs')
     parser.add_argument('--seed', type=int, default=None,
                         help='Random seed for sampled_pairs selection')
@@ -510,9 +565,16 @@ def main():
 
     for input_file, data_type in zip(args.input, args.type):
         if data_type.lower() == 'posts':
-            author_tokens, author_metadata, author_sources = load_posts_data(input_file, args.post_mode)
+            author_tokens, author_metadata, author_sources = load_posts_data(
+                input_file,
+                args.post_mode,
+                excluded_domains=args.exclude_domain
+            )
         elif data_type.lower() == 'comments':
-            author_tokens, author_metadata, author_sources = load_comments_data(input_file)
+            author_tokens, author_metadata, author_sources = load_comments_data(
+                input_file,
+                excluded_domains=args.exclude_domain
+            )
         else:
             print(f'Unknown data type: {data_type}')
             continue
@@ -541,6 +603,12 @@ def main():
         min_df=args.min_df,
         max_df=args.max_df
     )
+
+    author_list, tfidf_matrix = filter_authors_by_tfidf_features(author_list, tfidf_matrix, min_features=2)
+    if len(author_list) < 2:
+        print('\nError: Need at least 2 authors with sufficient TF-IDF features after pruning')
+        return
+
     similarities = cosine_similarity(tfidf_matrix)
 
     observed_sims, threshold = compute_threshold(

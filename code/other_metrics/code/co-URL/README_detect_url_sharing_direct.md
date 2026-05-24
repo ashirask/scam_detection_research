@@ -15,6 +15,17 @@ Key behaviors
   are stripped in the current implementation (see notes below about YouTube collapsing).
 - TF‑IDF pruning is supported via `--min-df` and `--max-df` to remove rare/common tokens.
 
+Recent changes in this branch
+- Added explicit domain exclusion before counting tokens via `--exclude-domain` (can be repeated).
+- When `--post-mode full_url` the script can now use raw URLs (no normalization) for token features —
+  this preserves the original URL strings you observed during testing.
+- Filtering order changed: domain exclusions are applied first, then per-author token counting (`--min-urls`),
+  then TF‑IDF vocabulary pruning (`--min-df`/`--max-df`), and finally authors with fewer than 2 non-zero
+  TF‑IDF features are removed before computing cosine similarities.
+
+These changes were introduced to make exclusion behavior explicit and to avoid degenerate
+similarity thresholds caused by one-token author vectors.
+
 Inputs
 - JSONL files containing Reddit posts (`--type posts`) or comments (`--type comments`).
   The script expects the JSON objects to contain `author` and (for posts) `url` or
@@ -42,10 +53,24 @@ Main CLI options (summary)
 - `--count-mode` unique|total : Count tokens uniquely or by total occurrences.
 - `--min-df` INT|FLOAT : TF‑IDF `min_df` (e.g., 2 or 0.01).
 - `--max-df` INT|FLOAT : TF‑IDF `max_df` (e.g., 0.9).
+ - `--exclude-domain` DOMAIN : Exclude tokens coming from this domain before counting tokens.
+   This flag can be repeated. Default exclusions: `i.imgur.com`, `api.redgifs.com`,
+   `external-preview.redd.it`, `reddit.com`, `v.redd.it`, `i.redd.it`, `redgifs.com`.
 - `--null-method` observed|sampled_pairs : How to derive threshold from observed pairs (sample or complete data).
 - `--sample-size` INT : When using `sampled_pairs` the number of observed pairs to sample.
 - `--seed` INT : RNG seed for sampling.
 - `--percentile` INT : Percentile for threshold (default 99).
+
+Filtering pipeline
+- Row-level validation: invalid JSON rows are skipped.
+- Author validation: rows with missing authors or `[deleted]` authors are skipped.
+- Post-type validation: self posts are skipped for the post loader, where is_self = true (meaning URLs are not external, rather links the post itself). 
+- Domain exclusion: `--exclude-domain` removes tokens from blocked domains before they are added.
+- Duplicate URL suppression: URLs extracted from `title`/`selftext` are skipped if they match the post’s main token.
+- Author count filtering: authors with `<= --min-urls` tokens are removed, using `--count-mode` to choose unique vs total counting.
+- TF-IDF vocabulary pruning: `--min-df` and `--max-df` prune rare/common tokens from the vector space.
+- TF-IDF row pruning: authors with fewer than 2 non-zero TF-IDF features after pruning are removed.
+- Threshold sampling: `--null-method sampled_pairs` uses only a sampled subset of observed author pairs to estimate the percentile threshold.
 
 Outputs
 - CSV: `co_url_suspicious_pairs_direct_{timestamp}.csv` — summary rows for each suspicious pair
