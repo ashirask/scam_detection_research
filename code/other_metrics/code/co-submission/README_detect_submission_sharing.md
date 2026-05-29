@@ -55,6 +55,10 @@ Filtering pipeline
 - TF-IDF pruning removes tokens outside the `--min-df` / `--max-df` range.
 - Suspicious pairs are those with cosine similarity above the selected percentile threshold.
 
+TF-IDF post-row pruning (new)
+- After TF-IDF vocabulary pruning, the script removes authors who have fewer than 2 non-zero TF-IDF features. This prevents the "one-token collapse" case where many users have a single shared submission token (or a single high-weight feature) that artificially inflates observed similarities and can lead to thresholds of 1.0.
+- The default behavior uses a minimum of 2 non-zero features (hardcoded as `min_features=2` in the script). If you want to change this, modify the `filter_authors_by_tfidf_features()` call in `detect_submission_sharing.py`.
+
 Outputs
 - CSV: `co_submission__*.csv`
   - Pairwise summary rows with user IDs, cosine similarity, percentile rank, shared submission count, and previews.

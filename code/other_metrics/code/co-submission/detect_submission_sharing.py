@@ -177,6 +177,23 @@ def build_user_matrix(user_tokens_list, min_df=2, max_df=0.9):
     return vectorizer, tfidf_matrix
 
 
+def filter_authors_by_tfidf_features(author_list, tfidf_matrix, min_features=2):
+    """Remove authors that have fewer than min_features non-zero TF-IDF features."""
+    feature_counts = np.diff(tfidf_matrix.indptr)
+    keep_mask = feature_counts >= min_features
+
+    kept_authors = [author for author, keep in zip(author_list, keep_mask) if keep]
+    filtered_matrix = tfidf_matrix[keep_mask]
+
+    removed = len(author_list) - len(kept_authors)
+    print(f"\nFiltering authors with < {min_features} non-zero TF-IDF features...")
+    print(f"  Authors before TF-IDF pruning filter: {len(author_list)}")
+    print(f"  Authors kept after TF-IDF pruning filter: {len(kept_authors)}")
+    print(f"  Authors removed after TF-IDF pruning filter: {removed}")
+
+    return kept_authors, filtered_matrix
+
+
 def compute_threshold(similarities, percentile=99, method="observed", sample_size=10000, seed=None):
     """Compute the percentile threshold from observed user-user similarities."""
     if similarities.shape[0] < 2:
@@ -393,11 +410,21 @@ def main():
         print(f"\nError while building TF-IDF matrix: {exc}")
         return
 
+    author_list = list(filtered_users.keys())
     print(f"  TF-IDF matrix shape: {tfidf_matrix.shape}")
     print(f"  Non-zero entries: {tfidf_matrix.nnz}")
+    author_list, tfidf_matrix = filter_authors_by_tfidf_features(author_list, tfidf_matrix, min_features=2)
+    if len(author_list) < 2:
+        print('\nError: Need at least 2 authors with sufficient TF-IDF features after pruning')
+        return
+
+    print(f"  TF-IDF matrix shape after row pruning: {tfidf_matrix.shape}")
+    print(f"  Non-zero entries after row pruning: {tfidf_matrix.nnz}")
     if tfidf_matrix.shape[1] == 0:
         print("\nError: No submission features remained after TF-IDF pruning")
         return
+
+    filtered_author_metadata = {author: all_user_metadata.get(author, []) for author in author_list}
 
     similarities = cosine_similarity(tfidf_matrix)
     observed_sims, threshold = compute_threshold(
@@ -410,7 +437,7 @@ def main():
     print(f"  {args.percentile}th percentile threshold from {args.null_method}: {threshold:.4f}")
 
     print("\nDetecting suspicious user pairs...")
-    suspicious_pairs = detect_suspicious_pairs(all_user_metadata, similarities, user_list, threshold, observed_sims)
+    suspicious_pairs = detect_suspicious_pairs(filtered_author_metadata, similarities, author_list, threshold, observed_sims)
     print(f"Found {len(suspicious_pairs)} suspicious user pairs")
 
     file_stem = build_output_stem(args)
