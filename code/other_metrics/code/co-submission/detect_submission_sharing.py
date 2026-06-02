@@ -262,22 +262,12 @@ def detect_suspicious_pairs(user_metadata_dict, similarities, user_list, thresho
 
 
 def build_user_preview(user_sources, limit=2):
-    """Create a compact preview of the submissions a user commented on."""
+    """Create a compact preview of a user's comment text only."""
     preview_items = []
     for item in user_sources[:limit]:
-        source_submission = item.get("submission_id", "")
-        source_type = item.get("source_type", "source")
-        subreddit = item.get("subreddit", "")
-        comment_id = item.get("comment_id", "")
-        body = truncate_text(item.get("body", ""), 120)
-        text_bits = [bit for bit in [body] if bit]
-        text_part = " | ".join(text_bits)
-        base = f"[{source_type}] submission={source_submission} subreddit=r/{subreddit}"
-        if comment_id:
-            base += f" comment={comment_id}"
-        if text_part:
-            base += f" {text_part}"
-        preview_items.append(base)
+        body = truncate_text(item.get("body", ""), 400)
+        if body:
+            preview_items.append(body)
     return " || ".join(preview_items)
 
 
