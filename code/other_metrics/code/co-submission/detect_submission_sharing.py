@@ -172,6 +172,7 @@ def build_user_matrix(user_tokens_list, min_df=2, max_df=0.9):
         max_df=max_df,
         norm="l2",
     )
+    # in context for suspicious pairs in the report this method will be called with user_tokens_list containing only the users that passed the initial filtering, so we can build the TF-IDF matrix directly without worrying about empty documents at this stage
     documents = [" ".join(tokens) for tokens in user_tokens_list]
     tfidf_matrix = vectorizer.fit_transform(documents)
     return vectorizer, tfidf_matrix
@@ -261,11 +262,11 @@ def detect_suspicious_pairs(user_metadata_dict, similarities, user_list, thresho
     return sorted(suspicious_pairs, key=lambda item: item["cosine_similarity"], reverse=True)
 
 
-def build_user_preview(user_sources, limit=2):
+def build_user_preview(user_sources, limit=5):
     """Create a compact preview of a user's comment text only."""
     preview_items = []
     for item in user_sources[:limit]:
-        body = truncate_text(item.get("body", ""), 400)
+        body = truncate_text(item.get("body", ""), 250)
         if body:
             preview_items.append(body)
     return " || ".join(preview_items)
@@ -366,6 +367,7 @@ def main():
     all_user_sources = defaultdict(list)
 
     for input_file in args.input:
+        #the load_comments_data function returns a dictionary of users and their associated data, we need to aggregate this data across multiple input files if provided, so we extend the lists for each user in the all_user_* dictionaries
         user_tokens, user_metadata, user_sources = load_comments_data(
             input_file,
             verbose=args.verbose,
@@ -385,9 +387,11 @@ def main():
         print("\nError: Need at least 2 users with enough submission tokens")
         return
 
+    #user_list includes all the users that passed the initial filtering based on min_comments, and user_tokens_list is a list of their corresponding submission token lists, which we will use to build the TF-IDF matrix where each row corresponds to a user and each column corresponds to a submission token feature
     user_list = list(filtered_users.keys())
     user_tokens_list = [filtered_users[user] for user in user_list]
 
+    #IDF is calculated based on the number of comments that mention each submission token across all users, so the min_df and max_df parameters will filter out tokens that are too rare or too common across the user base, which helps to focus on more distinctive submission tokens when computing cosine similarity between users
     print(f"\nComputing TF-IDF vectors for {len(user_list)} users...")
     print(f"  min_df={args.min_df}, max_df={args.max_df}")
     try:
