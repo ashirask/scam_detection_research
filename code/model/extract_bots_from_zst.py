@@ -83,10 +83,53 @@ BOT_FALSE_POSITIVES = {
     "botanic", "botswana", "bought", "boots", "booth"
 }
 
+# Bot phrases for text-based detection (Rule C)
+# These phrases commonly appear in bot comments/submissions
+BOT_PHRASES = [
+    "i am a bot",
+    "beep beep",
+    "beep boop",
+    "i'm a bot",
+    "im a bot",
+    "this is a bot",
+    "automated message",
+    "auto moderator",
+    "automated response",
+    "bot message",
+]
+
 
 # =============================================================================
 # FUNCTIONS
 # =============================================================================
+
+def rule_c_match(text: str):
+    """
+    Check if text content contains bot identification phrases (Rule C).
+    
+    This function searches for common bot phrases in comment body or
+    submission selftext/title. It uses case-insensitive substring matching.
+    
+    Args:
+        text (str): The text content to check (can be empty string)
+    
+    Returns:
+        bool: True if the text contains any bot phrase, False otherwise
+    
+    Note:
+        - Matching is case-insensitive
+        - Empty strings return False
+        - Phrases are defined in BOT_PHRASES constant
+    """
+    if not text:
+        return False
+    
+    text_lower = text.lower()
+    for phrase in BOT_PHRASES:
+        if phrase in text_lower:
+            return True
+    return False
+
 
 def rule_a_match(author: str):
     """
@@ -259,10 +302,26 @@ def run_pass1(args, zst_path, zst_name):
                         stats["skipped"] += 1
                         continue
                     
+                    # Rule A: Username pattern matching
                     rule_hit, matched_pattern = rule_a_match(author)
+                    
+                    # Rule B: BotRank lookup
                     botrank_hit = author.lower() in botrank_set
                     
-                    if rule_hit or botrank_hit:
+                    # Rule C: Text-based phrase matching
+                    # Extract text based on file type (comments use 'body', submissions use 'selftext')
+                    if args.file_type == "comments":
+                        text_content = record.get("body", "")
+                    else:  # submissions
+                        # Check both selftext and title for submissions
+                        selftext = record.get("selftext", "")
+                        title = record.get("title", "")
+                        text_content = f"{selftext} {title}"
+                    
+                    rule_c_hit = rule_c_match(text_content)
+                    
+                    # Match if any rule hits
+                    if rule_hit or botrank_hit or rule_c_hit:
                         author_post_count[author] = author_post_count.get(author, 0) + 1
                         stats["candidate_authors"] = len(author_post_count)
                     
