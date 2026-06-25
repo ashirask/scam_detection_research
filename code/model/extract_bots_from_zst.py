@@ -1,30 +1,49 @@
-"""
-extract_bots_from_zst.py
-------------------------
-Two-pass bot extraction from Reddit .zst dumps:
-- Pass 1: Author discovery (fast, author-only parse)
-- Pass 2: Full record extraction (complete JSON for confirmed authors)
+# =============================================================================
+# extract_bots_from_zst.py
+# =============================================================================
+# Two-pass bot extraction from Reddit .zst dumps:
+#
+# PASS 1 (Author Discovery):
+#   - Streams a single month's .zst file (comments or submissions)
+#   - Extracts only the 'author' field from each line (fast, minimal memory)
+#   - Applies bot username pattern matching (Rule A) and BotRank lookup (Rule B)
+#   - Counts posts per author and filters by --min-posts threshold
+#   - Writes qualifying bot usernames to a text file
+#
+# PASS 2 (Full Record Extraction):
+#   - Loads the global bot author list (produced by merge_pass1_authors.py)
+#   - Re-streams the same .zst file
+#   - Extracts complete JSON records only for authors in the global list
+#   - Writes compressed .jsonl.gz output (all JSON fields preserved)
+#
+# This two-pass design enables:
+#   1. Fast author discovery across all months
+#   2. Optional capping of total bot authors via random sampling
+#   3. Efficient full record extraction only for selected authors
+#
+# Usage:
+#   # Pass 1
+#   python extract_bots_from_zst.py \
+#     --pass-num 1 \
+#     --zst-file /data/reddit/RC_2024-01.zst \
+#     --file-type comments \
+#     --botrank botrank_top500.csv \
+#     --botrank-top-n 500 \
+#     --min-posts 3 \
+#     --output-dir results/
+#
+#   # Pass 2
+#   python extract_bots_from_zst.py \
+#     --pass-num 2 \
+#     --zst-file /data/reddit/RC_2024-01.zst \
+#     --file-type comments \
+#     --authors-file bot_authors_global.txt \
+#     --output-dir results/
+# =============================================================================
 
-Usage:
-  # Pass 1
-  python extract_bots_from_zst.py \
-    --pass-num 1 \
-    --zst-file /data/reddit/RC_2024-01.zst \
-    --file-type comments \
-    --botrank botrank_top500.csv \
-    --botrank-top-n 500 \
-    --min-posts 3 \
-    --output-dir results/
-
-  # Pass 2
-  python extract_bots_from_zst.py \
-    --pass-num 2 \
-    --zst-file /data/reddit/RC_2024-01.zst \
-    --file-type comments \
-    --authors-file bot_authors_global.txt \
-    --output-dir results/
-"""
-
+# =============================================================================
+# IMPORTS
+# =============================================================================
 import argparse
 import gzip
 import random
@@ -35,28 +54,56 @@ import io
 import json
 from pathlib import Path
 
-import zstandard as zstd
-import pandas as pd
+import zstandard as zstd  # Streaming zst decompression
+import pandas as pd  # BotRank CSV loading
 
+# Try to import orjson for faster JSON parsing, fallback to stdlib json
 try:
     import orjson
 except ImportError:
     orjson = None
 
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
 # Hardcoded skip list - applies to both passes
+# These authors are unconditionally skipped before any matching logic
+# Rationale:
+#   - [deleted]/[removed]: No username means no features can be computed
+#   - AutoModerator: Posts in nearly every subreddit, adds no discriminative signal
+#   - "": Malformed records
 SKIP_AUTHORS = {"[deleted]", "[removed]", "AutoModerator", ""}
 
+# False-positive guard for the \bbot\b pattern
+# These words contain "bot" as a substring but are not actual bot usernames
+# They are excluded to avoid false matches like "bottle", "bottom", etc.
 BOT_FALSE_POSITIVES = {
     "bottle", "bottom", "botox", "both", "bother", "botanical",
     "botanic", "botswana", "bought", "boots", "booth"
 }
 
 
+# =============================================================================
+# FUNCTIONS
+# =============================================================================
+
 def rule_a_match(author: str):
     """
-    Check if author matches bot username patterns.
-    Returns (bool, pattern_name_or_None) where pattern_name is one of:
-    "exact", "bot", "Auto", "auto", "mod", "_bot"
+    Check if a Reddit username matches bot identification patterns (Rule A).
+    
+    This function implements regex-based pattern matching to identify potential
+    bot accounts based on username characteristics. It checks multiple patterns
+    in order and returns the first matching pattern name.
+    
+    Args:
+        author (str): The Reddit username to check. Can be empty string.
+    
+    Returns:
+        tuple: (bool, str or None)
+            - bool: True if the author matches any bot pattern, False otherwise
+            - str or None: The pattern name that matched (e.g., "exact", "bot", "mod", "_bot"), or None if no match
+
     """
     if not author:
         return False, None
@@ -75,14 +122,6 @@ def rule_a_match(author: str):
     if re.search(r'\bbot\b', username_lower):
         return True, "bot"
     
-    # Starts with "Auto" (case-sensitive)
-    if author.startswith("Auto"):
-        return True, "Auto"
-    
-    # Whole-word "auto"
-    if re.search(r'\bauto\b', username_lower):
-        return True, "auto"
-    
     # Whole-word "mod"
     if re.search(r'\bmod\b', username_lower):
         return True, "mod"
@@ -95,12 +134,25 @@ def rule_a_match(author: str):
 
 
 def parse_json(line: str):
-    """Parse JSON using orjson if available, fallback to standard json."""
+    """
+    Parse a JSON string using orjson if available, with fallback to stdlib json.
+    
+    This function provides a unified interface for JSON parsing with preference
+    for the faster orjson library. If orjson is not installed or fails, it
+    gracefully falls back to the standard library json module.
+    
+    Args:
+        line (str): A JSON-formatted string (typically a single line from a .zst file)
+    
+    Returns:
+        dict or None: The parsed JSON object as a Python dictionary, or None if
+                      parsing fails
+    """
     if orjson is not None:
         try:
             return orjson.loads(line)
         except Exception:
-            pass
+            pass  # Fall through to stdlib json
     
     try:
         return json.loads(line)
@@ -109,14 +161,50 @@ def parse_json(line: str):
 
 
 def format_runtime(seconds: float) -> str:
-    """Format runtime as Xm Ys."""
+    """
+    Convert a runtime in seconds to a human-readable string format.
+    
+    Args:
+        seconds (float): Runtime duration in seconds (can be float for sub-second precision)
+    
+    Returns:
+        str: Formatted string in "Xm Ys" format (e.g., "6m 14s")
+    """
     minutes = int(seconds // 60)
     secs = int(seconds % 60)
     return f"{minutes}m {secs}s"
 
 
 def run_pass1(args, zst_path, zst_name):
-    """Pass 1: Author discovery - author-only parse, write qualifying authors to text file."""
+    """
+    Execute Pass 1: Author discovery phase.
+    
+    This function streams a single month's Reddit .zst file, extracts only the
+    'author' field from each record, and identifies bot accounts using pattern
+    matching (Rule A) and BotRank lookup (Rule B). It counts posts per author,
+    applies a minimum post threshold, and writes qualifying bot usernames to a
+    text file.
+    
+    Args:
+        args: Parsed command-line arguments containing:
+            - zst_file: Path to the .zst file
+            - file_type: "comments" or "submissions"
+            - botrank: Path to BotRank CSV file
+            - botrank_top_n: Number of top bots to use from BotRank
+            - min_posts: Minimum posts threshold for qualifying authors
+            - output_dir: Output directory path
+        zst_path (Path): Path object for the .zst file
+        zst_name (str): Stem of the .zst filename (e.g., "RC_2024-01")
+    
+    Outputs:
+        - pass1_authors_{file_type}_{period}.txt: Text file with one qualifying
+          bot username per line (sorted alphabetically)
+        - pass1_authors_{file_type}_{period}_summary.txt: Summary statistics
+    
+    Exit codes:
+        - 0: Success
+        - 1: Corruption or error detected (partial results may be saved)
+    """
     print(f"=== Pass 1: Author Discovery ===")
     
     # Load BotRank set
@@ -234,7 +322,37 @@ def run_pass1(args, zst_path, zst_name):
 
 
 def run_pass2(args, zst_path, zst_name):
-    """Pass 2: Full record extraction - load full JSON for authors in global list."""
+    """
+    Execute Pass 2: Full record extraction phase.
+    
+    This function re-streams a single month's Reddit .zst file and extracts
+    complete JSON records only for authors present in the global bot author list
+    (produced by merge_pass1_authors.py). The output is compressed to save disk
+    space and contains all JSON fields from the original records.
+    
+    Args:
+        args: Parsed command-line arguments containing:
+            - zst_file: Path to the .zst file
+            - file_type: "comments" or "submissions"
+            - authors_file: Path to global bot author list (from Pass 1 merge)
+            - output_dir: Output directory path
+        zst_path (Path): Path object for the .zst file
+        zst_name (str): Stem of the .zst filename (e.g., "RC_2024-01")
+    
+    Outputs:
+        - {file_type}_bots_{zst_stem}.jsonl.gz: Gzip-compressed JSONL file
+          containing full Reddit records for matched authors
+        - {file_type}_bots_{zst_stem}_summary.txt: Summary statistics
+    
+    Exit codes:
+        - 0: Success
+        - 1: Corruption or error detected (partial results may be saved)
+    
+    Note:
+        The global author list is produced by merge_pass1_authors.py which takes
+        the union of all Pass 1 outputs across months and optionally caps the
+        total via random sampling.
+    """
     print(f"=== Pass 2: Full Record Extraction ===")
     
     # Load author set
@@ -350,6 +468,30 @@ def run_pass2(args, zst_path, zst_name):
 
 
 def main():
+    """
+    Main entry point for the bot extraction script.
+    
+    This function parses command-line arguments, validates them based on the
+    selected pass number, and dispatches to the appropriate pass function
+    (run_pass1 or run_pass2).
+    
+    Command-line arguments:
+        --pass-num (required): Pass number (1 or 2)
+        --zst-file (required): Path to .zst file
+        --file-type (required): "comments" or "submissions"
+        --botrank (Pass 1 only): Path to BotRank CSV file
+        --botrank-top-n (Pass 1 only): Number of top bots from BotRank (default: 500)
+        --min-posts (Pass 1 only): Minimum posts threshold (default: 3)
+        --authors-file (Pass 2 only): Path to global author list
+        --output-dir: Output directory (default: current directory)
+    
+    Validation:
+        - Pass 1 requires --botrank to be specified
+        - Pass 2 requires --authors-file to be specified
+        - Invalid arguments result in error message and exit code 1
+    
+    The function does not return; it calls sys.exit() with appropriate exit codes.
+    """
     parser = argparse.ArgumentParser(
         description="Two-pass bot extraction from Reddit .zst dumps.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
