@@ -63,6 +63,10 @@ def main():
     print(f"  Found {len(files)} files")
     
     for filepath in files:
+        # Skip summary files (they end with _summary.txt)
+        if "_summary" in filepath:
+            print(f"  Skipping {filepath} (summary file)")
+            continue
         print(f"  Reading {filepath}...")
         with open(filepath, 'r', encoding='utf-8') as f:
             for line in f:
