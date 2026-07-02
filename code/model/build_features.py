@@ -90,7 +90,7 @@ def load_domain_whitelist(path):
         return set(line.strip() for line in f if line.strip())
 
 
-def build_comment_lookup(comments_bot_path, comments_human_path):
+def build_comment_lookup(comments_bot_path, comments_human_path, parent_comments_path=None):
     """
     Build a lookup dictionary mapping comment IDs to their creation timestamps.
     This is required for temporal features to compute reply times.
@@ -98,9 +98,10 @@ def build_comment_lookup(comments_bot_path, comments_human_path):
     Args:
         comments_bot_path: Path to bot comments JSONL
         comments_human_path: Path to human comments JSONL
+        parent_comments_path: Optional path to parent comments JSONL from ZST extraction
     
     Returns:
-        Dictionary {comment_id: created_utc} for all comments in both files
+        Dictionary {comment_id: created_utc} for all comments in both files plus parent comments
     """
     lookup = {}
     
@@ -119,6 +120,17 @@ def build_comment_lookup(comments_bot_path, comments_human_path):
             ts = comment.get("created_utc")
             if cid and ts:
                 lookup[cid] = ts
+    
+    # Process parent comments from ZST extraction if provided
+    # This improves temporal feature coverage by including parents outside the 10k user dataset
+    if parent_comments_path:
+        print(f"Loading parent comments from {parent_comments_path}")
+        for record in stream_jsonl(parent_comments_path):
+            cid = record.get("id")
+            ts = record.get("created_utc")
+            if cid and ts:
+                lookup[cid] = ts
+        print(f"  Added {len(lookup)} total comments to lookup (including parents)")
     
     return lookup
 
@@ -183,6 +195,8 @@ def temporal_features(comments, comment_lookup):
     
     for c in comments:
         parent_id = c.get("parent_id", "")
+        # Convert to string in case it's stored as an integer in the data
+        parent_id = str(parent_id) if parent_id is not None else ""
         # Only process replies to other comments (parent_id starts with "t1_")
         if not parent_id.startswith("t1_"):
             continue
@@ -205,7 +219,7 @@ def temporal_features(comments, comment_lookup):
         }
     
     # Count how many comments are replies to other comments
-    t1_replies = sum(1 for c in comments if c.get("parent_id", "").startswith("t1_"))
+    t1_replies = sum(1 for c in comments if str(c.get("parent_id", "")).startswith("t1_"))
     
     return {
         "mean_reply_time_seconds": sum(reply_times) / len(reply_times),
@@ -686,6 +700,7 @@ def main():
     parser.add_argument("--submissions-human", required=True, help="Path to human submissions JSONL")
     parser.add_argument("--domain-whitelist", required=True, help="Path to domain whitelist text file")
     parser.add_argument("--temporal", action="store_true", help="Include temporal reply-time features")
+    parser.add_argument("--parent-comments", help="Path to parent comments JSONL from ZST extraction (improves temporal coverage)")
     parser.add_argument("--output", required=True, help="Output parquet file path")
     
     args = parser.parse_args()
@@ -699,7 +714,11 @@ def main():
     comment_lookup = None
     if args.temporal:
         print("Building comment lookup for temporal features...")
-        comment_lookup = build_comment_lookup(args.comments_bot, args.comments_human)
+        comment_lookup = build_comment_lookup(
+            args.comments_bot, 
+            args.comments_human,
+            parent_comments_path=args.parent_comments
+        )
         print(f"  Built lookup with {len(comment_lookup)} comments")
     
     # Step 3: Process bot population (label = 1)
