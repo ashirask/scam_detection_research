@@ -105,7 +105,7 @@ def prepare_features_and_labels(df):
     return X, y, feature_cols
 
 
-def create_data_splits(X, y, df):
+def create_data_splits(X, y, df, artifact_dir):
     """
     Create stratified train/validation/test splits (70%/15%/15%).
     Save test authors to prevent leakage in pseudolabeling.
@@ -114,6 +114,7 @@ def create_data_splits(X, y, df):
         X: Feature DataFrame
         y: Label Series
         df: Original DataFrame (to extract author names)
+        artifact_dir: Directory to save test_authors.csv
     
     Returns:
         X_train, X_val, X_test: Feature splits
@@ -135,14 +136,14 @@ def create_data_splits(X, y, df):
     
     # Save test author list — pseudolabeling rounds must never touch these authors
     test_authors = df.loc[X_test.index, "author"]
-    os.makedirs("artifacts", exist_ok=True)
-    test_authors.to_csv("artifacts/test_authors.csv", index=False)
-    print("Saved test authors to artifacts/test_authors.csv")
+    os.makedirs(artifact_dir, exist_ok=True)
+    test_authors.to_csv(f"{artifact_dir}/test_authors.csv", index=False)
+    print(f"Saved test authors to {artifact_dir}/test_authors.csv")
     
     return X_train, X_val, X_test, y_train, y_val, y_test
 
 
-def create_preprocessing_variants(X_train, X_val, X_test, feature_cols):
+def create_preprocessing_variants(X_train, X_val, X_test, feature_cols, artifact_dir):
     """
     Create three preprocessing variants for different model types.
     All preprocessors are fit on training data only.
@@ -152,6 +153,7 @@ def create_preprocessing_variants(X_train, X_val, X_test, feature_cols):
         X_val: Validation features
         X_test: Test features
         feature_cols: List of feature column names
+        artifact_dir: Directory to save preprocessor artifacts
     
     Returns:
         Dictionary mapping variant names to (train, val, test) tuples
@@ -187,11 +189,11 @@ def create_preprocessing_variants(X_train, X_val, X_test, feature_cols):
     )
     
     # Save preprocessors for reuse in pseudolabeling and inference
-    os.makedirs("artifacts", exist_ok=True)
-    joblib.dump(imputer_B, "artifacts/imputer_median.pkl")
-    joblib.dump(imputer_C, "artifacts/imputer_mlp.pkl")
-    joblib.dump(scaler_C, "artifacts/scaler_mlp.pkl")
-    print("Saved preprocessors to artifacts/")
+    os.makedirs(artifact_dir, exist_ok=True)
+    joblib.dump(imputer_B, f"{artifact_dir}/imputer_median.pkl")
+    joblib.dump(imputer_C, f"{artifact_dir}/imputer_mlp.pkl")
+    joblib.dump(scaler_C, f"{artifact_dir}/scaler_mlp.pkl")
+    print(f"Saved preprocessors to {artifact_dir}/")
     
     return {
         "A": (X_train_A, X_val_A, X_test_A),
@@ -200,10 +202,13 @@ def create_preprocessing_variants(X_train, X_val, X_test, feature_cols):
     }
 
 
-def get_model_registry():
+def get_model_registry(skip_tabpfn=False):
     """
     Define the model registry with configurations for each model.
     Each model specifies the model class, preprocessing variant, and fit kwargs.
+    
+    Args:
+        skip_tabpfn: If True, exclude TabPFN from model registry (requires license)
     
     Returns:
         Dictionary of model configurations
@@ -255,16 +260,16 @@ def get_model_registry():
             "fit_kwargs": {}          # No special fit kwargs
         },
         "tabpfn": {
-            # TabPFN transformer-based classifier
+            # TabPFN transformer-based classifier (optional - requires license)
             "model": TabPFNClassifier(
-                device="cpu",                      # Use CPU (change to 'cuda' if GPU available)
-                N_ensemble_configurations=32,      # Number of ensemble configurations
+                device="cuda",                      # Use CPU (change to 'cuda' if GPU available)
             ),
             "preprocessing": "B",      # Median imputation needed
             "fit_kwargs": {}          # No special fit kwargs
             # Note: TabPFN row limit ~10k, feature limit ~100.
             # ~7k train rows and 42 features fits within limits.
-        },
+            # Requires TABPFN_TOKEN environment variable or license acceptance.
+        } if not skip_tabpfn else None,
         "mlp": {
             # Multi-layer perceptron classifier
             "model": MLPClassifier(
@@ -279,6 +284,10 @@ def get_model_registry():
             "fit_kwargs": {}          # No special fit kwargs
         },
     }
+    
+    # Remove TabPFN entry if skip_tabpfn is True
+    if skip_tabpfn and "tabpfn" in MODELS:
+        del MODELS["tabpfn"]
     
     return MODELS
 
@@ -331,7 +340,7 @@ def evaluate(model, X, y_true, name="model", threshold=0.5):
     return metrics
 
 
-def train_models(MODELS, PREPROCESSING_DATA, y_train, y_val):
+def train_models(MODELS, PREPROCESSING_DATA, y_train, y_val, artifact_dir):
     """
     Train all models in the registry and evaluate on validation set.
     
@@ -340,11 +349,12 @@ def train_models(MODELS, PREPROCESSING_DATA, y_train, y_val):
         PREPROCESSING_DATA: Dictionary of preprocessing variants
         y_train: Training labels
         y_val: Validation labels
+        artifact_dir: Directory to save trained models
     
     Returns:
         Dictionary of results for each model
     """
-    os.makedirs("results", exist_ok=True)
+    os.makedirs(artifact_dir, exist_ok=True)
     all_results = {}
     
     for name, config in MODELS.items():
@@ -368,7 +378,7 @@ def train_models(MODELS, PREPROCESSING_DATA, y_train, y_val):
         val_metrics = evaluate(model, Xv, y_val, name=f"{name}_val")
         
         # Save the trained model
-        joblib.dump(model, f"artifacts/{name}_model.pkl")
+        joblib.dump(model, f"{artifact_dir}/{name}_model.pkl")
         
         # Store results
         all_results[name] = {
@@ -380,7 +390,7 @@ def train_models(MODELS, PREPROCESSING_DATA, y_train, y_val):
     return all_results
 
 
-def evaluate_test_set(MODELS, PREPROCESSING_DATA, all_results, y_test):
+def evaluate_test_set(MODELS, PREPROCESSING_DATA, all_results, y_test, artifact_dir):
     """
     Evaluate all models on the held-out test set (run once at the end).
     
@@ -389,6 +399,7 @@ def evaluate_test_set(MODELS, PREPROCESSING_DATA, all_results, y_test):
         PREPROCESSING_DATA: Dictionary of preprocessing variants
         all_results: Dictionary of existing results (will be updated)
         y_test: Test labels
+        artifact_dir: Directory where trained models are saved
     
     Returns:
         Updated all_results dictionary with test metrics
@@ -400,7 +411,7 @@ def evaluate_test_set(MODELS, PREPROCESSING_DATA, all_results, y_test):
         _, _, Xte = PREPROCESSING_DATA[config["preprocessing"]]
         
         # Load the trained model
-        model = joblib.load(f"artifacts/{name}_model.pkl")
+        model = joblib.load(f"{artifact_dir}/{name}_model.pkl")
         
         # Evaluate on test set
         test_metrics = evaluate(model, Xte, y_test, name=f"{name}_TEST")
@@ -411,12 +422,13 @@ def evaluate_test_set(MODELS, PREPROCESSING_DATA, all_results, y_test):
     return all_results
 
 
-def save_results_summary(all_results):
+def save_results_summary(all_results, output_dir):
     """
     Save all model metrics to a CSV file and print comparison table.
     
     Args:
         all_results: Dictionary of results for each model
+        output_dir: Directory to save results
     """
     rows = []
     for name, res in all_results.items():
@@ -433,7 +445,7 @@ def save_results_summary(all_results):
     
     # Create DataFrame and save to CSV
     results_df = pd.DataFrame(rows)
-    results_df.to_csv("results/all_model_metrics.csv", index=False)
+    results_df.to_csv(f"{output_dir}/all_model_metrics.csv", index=False)
     
     # Print comparison table
     print("\n=== Model Comparison ===")
@@ -441,7 +453,7 @@ def save_results_summary(all_results):
                        "cohen_kappa","fpr","fnr"]].to_string(index=False))
 
 
-def compute_shap_importance(MODELS, PREPROCESSING_DATA, feature_cols):
+def compute_shap_importance(MODELS, PREPROCESSING_DATA, feature_cols, artifact_dir, output_dir):
     """
     Compute SHAP feature importance for LightGBM (fastest SHAP integration).
     Generate bar plot, beeswarm plot, and feature ranking.
@@ -450,11 +462,13 @@ def compute_shap_importance(MODELS, PREPROCESSING_DATA, feature_cols):
         MODELS: Dictionary of model configurations
         PREPROCESSING_DATA: Dictionary of preprocessing variants
         feature_cols: List of feature column names
+        artifact_dir: Directory where trained models are saved
+        output_dir: Directory to save results
     """
     print(f"\n{'='*50}\nComputing SHAP Feature Importance\n{'='*50}")
     
     # Load LightGBM model and get preprocessed test data (variant A)
-    lgbm_model = joblib.load("artifacts/lightgbm_model.pkl")
+    lgbm_model = joblib.load(f"{artifact_dir}/lightgbm_model.pkl")
     Xtr, Xv, Xte = PREPROCESSING_DATA["A"]
     
     # Create SHAP explainer for tree models
@@ -467,22 +481,22 @@ def compute_shap_importance(MODELS, PREPROCESSING_DATA, feature_cols):
     # Bar plot — mean |SHAP| per feature (global importance)
     shap.summary_plot(sv, Xte, plot_type="bar", show=False)
     plt.tight_layout()
-    plt.savefig("results/shap_bar.png", dpi=150)
+    plt.savefig(f"{output_dir}/shap_bar.png", dpi=150)
     plt.close()
-    print("Saved SHAP bar plot to results/shap_bar.png")
+    print(f"Saved SHAP bar plot to {output_dir}/shap_bar.png")
     
     # Beeswarm plot — direction and spread of each feature's effect
     shap.summary_plot(sv, Xte, show=False)
     plt.tight_layout()
-    plt.savefig("results/shap_beeswarm.png", dpi=150)
+    plt.savefig(f"{output_dir}/shap_beeswarm.png", dpi=150)
     plt.close()
-    print("Saved SHAP beeswarm plot to results/shap_beeswarm.png")
+    print(f"Saved SHAP beeswarm plot to {output_dir}/shap_beeswarm.png")
     
     # Compute and save feature ranking by mean absolute SHAP value
     mean_abs_shap = pd.Series(
         np.abs(sv).mean(axis=0), index=feature_cols
     ).sort_values(ascending=False)
-    mean_abs_shap.to_csv("results/shap_feature_ranking.csv")
+    mean_abs_shap.to_csv(f"{output_dir}/shap_feature_ranking.csv")
     
     print("\nTop 15 features by SHAP:")
     print(mean_abs_shap.head(15).to_string())
@@ -494,11 +508,11 @@ def compute_shap_importance(MODELS, PREPROCESSING_DATA, feature_cols):
     print(drop_candidates)
     
     # Save raw SHAP values for further analysis
-    pd.DataFrame(sv, columns=feature_cols).to_parquet("results/shap_values.parquet")
-    print("Saved raw SHAP values to results/shap_values.parquet")
+    pd.DataFrame(sv, columns=feature_cols).to_parquet(f"{output_dir}/shap_values.parquet")
+    print(f"Saved raw SHAP values to {output_dir}/shap_values.parquet")
 
 
-def compute_permutation_importance(MODELS, PREPROCESSING_DATA, feature_cols, y_val):
+def compute_permutation_importance(MODELS, PREPROCESSING_DATA, feature_cols, y_val, artifact_dir, output_dir):
     """
     Compute permutation importance for LightGBM and RandomForest.
     Cross-validates SHAP findings to identify truly unimportant features.
@@ -508,12 +522,14 @@ def compute_permutation_importance(MODELS, PREPROCESSING_DATA, feature_cols, y_v
         PREPROCESSING_DATA: Dictionary of preprocessing variants
         feature_cols: List of feature column names
         y_val: Validation labels
+        artifact_dir: Directory where trained models are saved
+        output_dir: Directory to save results
     """
     print(f"\n{'='*50}\nComputing Permutation Importance\n{'='*50}")
     
     for name in ["lightgbm", "randomforest"]:
         # Load the trained model
-        model = joblib.load(f"artifacts/{name}_model.pkl")
+        model = joblib.load(f"{artifact_dir}/{name}_model.pkl")
         
         # Get the appropriate preprocessing variant
         Xtr, Xv, _ = PREPROCESSING_DATA[MODELS[name]["preprocessing"]]
@@ -534,13 +550,13 @@ def compute_permutation_importance(MODELS, PREPROCESSING_DATA, feature_cols, y_v
         }).sort_values("importance_mean", ascending=False)
         
         # Save to CSV
-        perm_df.to_csv(f"results/permutation_importance_{name}.csv", index=False)
+        perm_df.to_csv(f"{output_dir}/permutation_importance_{name}.csv", index=False)
         
         print(f"\nBottom 10 features — {name}:")
         print(perm_df.tail(10).to_string(index=False))
 
 
-def compute_correlation_analysis(X_train, feature_cols):
+def compute_correlation_analysis(X_train, feature_cols, output_dir):
     """
     Compute feature correlation matrix and identify highly correlated pairs.
     Generate and save correlation heatmap.
@@ -548,6 +564,7 @@ def compute_correlation_analysis(X_train, feature_cols):
     Args:
         X_train: Training features (use variant B for correlation analysis)
         feature_cols: List of feature column names
+        output_dir: Directory to save results
     """
     print(f"\n{'='*50}\nComputing Correlation Analysis\n{'='*50}")
     
@@ -570,9 +587,9 @@ def compute_correlation_analysis(X_train, feature_cols):
     plt.figure(figsize=(16, 14))
     sns.heatmap(corr, cmap="coolwarm", center=0, square=True, linewidths=0.5)
     plt.tight_layout()
-    plt.savefig("results/correlation_heatmap.png", dpi=150)
+    plt.savefig(f"{output_dir}/correlation_heatmap.png", dpi=150)
     plt.close()
-    print("Saved correlation heatmap to results/correlation_heatmap.png")
+    print(f"Saved correlation heatmap to {output_dir}/correlation_heatmap.png")
 
 
 def main():
@@ -597,6 +614,7 @@ def main():
     parser.add_argument("--artifact-dir", default="artifacts/", help="Directory for model artifacts")
     parser.add_argument("--skip-shap", action="store_true", help="Skip SHAP analysis")
     parser.add_argument("--skip-permutation", action="store_true", help="Skip permutation importance")
+    parser.add_argument("--skip-tabpfn", action="store_true", help="Skip TabPFN (requires license/API key)")
     
     args = parser.parse_args()
     
@@ -618,46 +636,46 @@ def main():
     
     # Step 3: Create data splits
     print("\n[Step 3] Creating data splits...")
-    X_train, X_val, X_test, y_train, y_val, y_test = create_data_splits(X, y, df)
+    X_train, X_val, X_test, y_train, y_val, y_test = create_data_splits(X, y, df, args.artifact_dir)
     
     # Step 4: Create preprocessing variants
     print("\n[Step 4] Creating preprocessing variants...")
-    PREPROCESSING_DATA = create_preprocessing_variants(X_train, X_val, X_test, feature_cols)
+    PREPROCESSING_DATA = create_preprocessing_variants(X_train, X_val, X_test, feature_cols, args.artifact_dir)
     
     # Step 5: Get model registry
     print("\n[Step 5] Loading model registry...")
-    MODELS = get_model_registry()
+    MODELS = get_model_registry(skip_tabpfn=args.skip_tabpfn)
     
     # Step 6: Train all models
     print("\n[Step 6] Training models...")
-    all_results = train_models(MODELS, PREPROCESSING_DATA, y_train, y_val)
+    all_results = train_models(MODELS, PREPROCESSING_DATA, y_train, y_val, args.artifact_dir)
     
     # Step 7: Evaluate on test set
     print("\n[Step 7] Evaluating on test set...")
-    all_results = evaluate_test_set(MODELS, PREPROCESSING_DATA, all_results, y_test)
+    all_results = evaluate_test_set(MODELS, PREPROCESSING_DATA, all_results, y_test, args.artifact_dir)
     
     # Step 8: Save results summary
     print("\n[Step 8] Saving results summary...")
-    save_results_summary(all_results)
+    save_results_summary(all_results, args.output_dir)
     
     # Step 9: Compute SHAP importance (optional)
     if not args.skip_shap:
         print("\n[Step 9] Computing SHAP feature importance...")
-        compute_shap_importance(MODELS, PREPROCESSING_DATA, feature_cols)
+        compute_shap_importance(MODELS, PREPROCESSING_DATA, feature_cols, args.artifact_dir, args.output_dir)
     else:
         print("\n[Step 9] Skipping SHAP analysis (--skip-shap flag set)")
     
     # Step 10: Compute permutation importance (optional)
     if not args.skip_permutation:
         print("\n[Step 10] Computing permutation importance...")
-        compute_permutation_importance(MODELS, PREPROCESSING_DATA, feature_cols, y_val)
+        compute_permutation_importance(MODELS, PREPROCESSING_DATA, feature_cols, y_val, args.artifact_dir, args.output_dir)
     else:
         print("\n[Step 10] Skipping permutation importance (--skip-permutation flag set)")
     
     # Step 11: Compute correlation analysis
     print("\n[Step 11] Computing correlation analysis...")
     _, X_train_B, _ = PREPROCESSING_DATA["B"]
-    compute_correlation_analysis(X_train_B, feature_cols)
+    compute_correlation_analysis(X_train_B, feature_cols, args.output_dir)
     
     print("\n" + "="*60)
     print("Training pipeline complete!")
