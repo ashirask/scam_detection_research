@@ -5,8 +5,8 @@
 #
 # PASS 1 (Author Discovery):
 #   - Streams a single month's .zst file (comments or submissions)
-#   - Extracts only the 'author' field from each line (fast, minimal memory)
-#   - Applies bot username pattern matching (Rule A) and BotRank lookup (Rule B)
+#   - Extracts only the 'author' and 'text' fields from each line (fast, minimal memory)
+#   - Applies bot username pattern matching (Rule A) and BotRank lookup (Rule B) and "i am bot" pattern matching (Rule C)
 #   - Counts posts per author and filters by --min-posts threshold
 #   - Writes qualifying bot usernames to a text file
 #
@@ -289,8 +289,11 @@ def run_pass1(args, zst_path, zst_name):
                     
                     try:
                         record = parse_json(line)
-                    except Exception:
+                    except (json.JSONDecodeError, ValueError) as e:
+                        # Line-level JSON error - can skip and continue
                         stats["parse_errors"] += 1
+                        if stats["parse_errors"] <= 10:  # Only log first 10 to avoid spam
+                            print(f"[WARN] JSON parse error at line {stats['total_lines']}: {e}", file=sys.stderr)
                         continue
                     
                     if record is None:
@@ -320,8 +323,11 @@ def run_pass1(args, zst_path, zst_name):
                     
                     rule_c_hit = rule_c_match(text_content)
                     
-                    # Match if any rule hits
-                    if rule_hit or botrank_hit or rule_c_hit:
+                    # Determine if author matches bot detection rules
+                    is_bot = rule_hit or botrank_hit or rule_c_hit
+                    
+                    # Match based on mode: bot mode extracts bots, human mode extracts non-bots
+                    if (args.mode == "bot" and is_bot) or (args.mode == "human" and not is_bot):
                         author_post_count[author] = author_post_count.get(author, 0) + 1
                         stats["candidate_authors"] = len(author_post_count)
                     
@@ -329,12 +335,16 @@ def run_pass1(args, zst_path, zst_name):
                     if stats["total_lines"] % 1_000_000 == 0:
                         print(f"  Processed {stats['total_lines']:,} lines, {stats['candidate_authors']:,} candidate authors...")
     except zstd.ZstdError as e:
+        # File-level corruption - cannot continue past this point
         corruption_detected = True
-        print(f"[ERROR] Zstd decompression error after {stats['total_lines']} lines: {e}", file=sys.stderr)
+        print(f"[ERROR] Zstd decompression error at line {stats['total_lines']}: {e}", file=sys.stderr)
         print(f"[ERROR] File may be corrupted or truncated: {args.zst_file}", file=sys.stderr)
+        print(f"[INFO] Partial results saved: {len(author_post_count)} authors found before error", file=sys.stderr)
     except Exception as e:
+        # Unexpected error - treat as corruption
         corruption_detected = True
-        print(f"[ERROR] Unexpected error after {stats['total_lines']} lines: {e}", file=sys.stderr)
+        print(f"[ERROR] Unexpected error at line {stats['total_lines']}: {type(e).__name__}: {e}", file=sys.stderr)
+        print(f"[INFO] Partial results saved: {len(author_post_count)} authors found before error", file=sys.stderr)
     
     runtime = time.time() - start_time
     
@@ -344,6 +354,17 @@ def run_pass1(args, zst_path, zst_name):
         if count >= args.min_posts
     }
     stats["below_min_posts"] = len(author_post_count) - len(qualifying)
+    
+    # Apply max-authors cap via random sample if specified
+    if args.max_authors and len(qualifying) > args.max_authors:
+        import random
+        random.seed(args.seed)
+        qualifying = set(random.sample(sorted(qualifying), args.max_authors))
+        stats["capped"] = True
+        stats["cap_reason"] = f"random sample (seed={args.seed})"
+    else:
+        stats["capped"] = False
+        stats["cap_reason"] = "no cap applied"
     
     # Write qualifying authors
     with open(output_authors, 'w', encoding='utf-8') as f:
@@ -360,6 +381,8 @@ def run_pass1(args, zst_path, zst_name):
         f"Candidate authors found  : {stats['candidate_authors']:,}",
         f"Below min-posts (< {args.min_posts})    : {stats['below_min_posts']:,}",
         f"Qualifying authors output: {len(qualifying):,}",
+        f"Capped                   : {stats['capped']}",
+        f"Cap reason               : {stats['cap_reason']}",
         f"Output file              : {output_authors}",
         f"Corrupted                : {corruption_detected}",
         f"Runtime                  : {format_runtime(runtime)}",
@@ -455,8 +478,11 @@ def run_pass2(args, zst_path, zst_name):
                     
                     try:
                         record = parse_json(line)
-                    except Exception:
+                    except (json.JSONDecodeError, ValueError) as e:
+                        # Line-level JSON error - can skip and continue
                         stats["parse_errors"] += 1
+                        if stats["parse_errors"] <= 10:  # Only log first 10 to avoid spam
+                            print(f"[WARN] JSON parse error at line {stats['total_lines']}: {e}", file=sys.stderr)
                         continue
                     
                     if record is None:
@@ -484,12 +510,16 @@ def run_pass2(args, zst_path, zst_name):
                     if stats["total_lines"] % 1_000_000 == 0:
                         print(f"  Processed {stats['total_lines']:,} lines, {stats['matched']:,} matched so far...")
     except zstd.ZstdError as e:
+        # File-level corruption - cannot continue past this point
         corruption_detected = True
-        print(f"[ERROR] Zstd decompression error after {stats['total_lines']} lines: {e}", file=sys.stderr)
+        print(f"[ERROR] Zstd decompression error at line {stats['total_lines']}: {e}", file=sys.stderr)
         print(f"[ERROR] File may be corrupted or truncated: {args.zst_file}", file=sys.stderr)
+        print(f"[INFO] Partial results saved: {stats['matched']} matches found before error", file=sys.stderr)
     except Exception as e:
+        # Unexpected error - treat as corruption
         corruption_detected = True
-        print(f"[ERROR] Unexpected error after {stats['total_lines']} lines: {e}", file=sys.stderr)
+        print(f"[ERROR] Unexpected error at line {stats['total_lines']}: {type(e).__name__}: {e}", file=sys.stderr)
+        print(f"[INFO] Partial results saved: {stats['matched']} matches found before error", file=sys.stderr)
     finally:
         if out_f:
             out_f.close()
@@ -589,6 +619,24 @@ def main():
         type=int,
         default=3,
         help="Minimum posts threshold for Pass 1 (default: 3)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["bot", "human"],
+        default="bot",
+        help="Extraction mode: 'bot' (extract accounts matching bot rules) or 'human' (extract accounts NOT matching bot rules) (default: bot, Pass 1 only)",
+    )
+    parser.add_argument(
+        "--max-authors",
+        type=int,
+        default=None,
+        help="Cap total authors extracted via random sample (Pass 1 only, useful for human mode to avoid millions of results)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility when using --max-authors (default: 42)",
     )
     parser.add_argument(
         "--authors-file",
