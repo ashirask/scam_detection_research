@@ -144,7 +144,7 @@ def polite_get(session, url, params, min_sleep, max_retries=6):
             time.sleep(wait)
             backoff = min(backoff * 2, 120)
             continue
-        if resp.status_code >= 500 or "timed out" in resp.text.lower():
+        if resp.status_code >= 500 or resp.status_code == 422 or "timed out" in resp.text.lower():
             # HTTP 5xx = server error (temporary, retryable)
             logging.warning(f"  server error/timeout ({resp.status_code}); retrying in {backoff:.0f}s")
             time.sleep(backoff)
@@ -154,7 +154,15 @@ def polite_get(session, url, params, min_sleep, max_retries=6):
         # Unrecoverable error (4xx other than 429, like 400, 404, 422)
         # These are client errors - something wrong with our request, not the server
         # Raise an exception to surface this to the caller
-        resp.raise_for_status()
+        #resp.raise_for_status()
+        if resp.status_code >= 400:
+            logging.error(
+                "Status=%s\nURL=%s\nBody=%s",
+                resp.status_code,
+                resp.url,
+                resp.text,
+            )
+            resp.raise_for_status()
 
     raise RuntimeError(f"Exceeded retries for {url} params={params}")
 
@@ -210,8 +218,10 @@ def fetch_author_records(session, author, kind, after, before, limit, min_sleep)
         # Build the query parameters for this API request
         params = {
             "author": author,  # The Reddit username
-            "limit": limit,  # How many records to return per page
+            #"limit": limit,  # How many records to return per page
+            "limit": "auto",  # API requires "auto" instead of numeric limit
             "sort": "asc",  # Sort in ascending order by timestamp (oldest first)
+            "meta-app": "download-tool",  # Required parameter for the API
         }
         if cursor is not None:
             # If we have a cursor, only fetch records after this timestamp
@@ -280,7 +290,7 @@ def process_author(author, label, output_dir, after, before, limit, min_sleep):
     session = requests.Session()
     # Set a User-Agent header so the API knows who is making the request
     # You should replace the email with your actual email for the API provider to contact you
-    session.headers["User-Agent"] = "bot-detection-research/1.0 (contact: set-your-email-here)"
+    session.headers["User-Agent"] = "bot-detection-research/1.0"
 
     results = {}
     # Process both comments and submissions for this author
@@ -354,7 +364,7 @@ def main():
     ap.add_argument("--output-dir", required=True, help="Directory where downloaded data will be saved")
     ap.add_argument("--after", default=None, help="Only fetch posts/comments after this date (e.g. 2025-01-01)")
     ap.add_argument("--before", default=None, help="Only fetch posts/comments before this date (e.g. 2026-01-01)")
-    ap.add_argument("--limit", type=int, default=100, help="Page size, max 100 (default: 100)")
+    ap.add_argument("--limit", type=int, default=100, help="Deprecated: API now uses 'auto' limit (ignored)")
     ap.add_argument("--workers", type=int, default=6, help="Concurrent authors in flight (default: 6, keep modest)")
     ap.add_argument("--min-sleep", type=float, default=0.2, help="Baseline delay between requests, seconds (default: 0.2)")
     ap.add_argument("--log-file", default=None, help="Optional file to write log messages to")
@@ -379,6 +389,7 @@ def main():
     # Path to the failures log file
     failures_path = output_dir / "failures.log"
     completed = 0
+    last_hourly_log = time.time()  # Track when we last logged hourly stats
     
     # Use ThreadPoolExecutor to process multiple authors in parallel
     # This creates a pool of worker threads (specified by --workers)
@@ -415,6 +426,15 @@ def main():
                 with _rate_lock:
                     remaining = _min_remaining_seen[0]
                 logging.info(f"Progress: {completed}/{len(authors)} authors done (last seen rate-remaining={remaining})")
+            
+            # Print hourly rate limit stats
+            if time.time() - last_hourly_log >= 3600:  # Every hour (3600 seconds)
+                with _rate_lock:
+                    remaining = _min_remaining_seen[0]
+                hours_elapsed = (time.time() - last_hourly_log) / 3600
+                authors_per_hour = 100 / hours_elapsed if completed >= 100 else completed / hours_elapsed
+                logging.info(f"Hourly stats: {completed}/{len(authors)} authors done ({authors_per_hour:.1f} authors/hour), rate-remaining={remaining}")
+                last_hourly_log = time.time()
 
     logging.info(f"Done. {completed}/{len(authors)} authors processed. See {failures_path} for any failures.")
 
