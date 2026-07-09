@@ -79,20 +79,9 @@ Pass 1 output. Filters accounts with too little signal for feature engineering.
 - `bot` (default): extracts accounts matching bot detection rules
 - `human`: extracts accounts NOT matching bot detection rules (inverse selection)
 
-**Warning:** Human mode can extract millions of accounts. Use `--max-authors` to cap the output.
-
 Pass 2 is mode-agnostic — it simply extracts full records for whatever author list is provided.
 
-### 9. Maximum authors cap (`--max-authors`, default None, Pass 1 only)
-Optional ceiling on total authors extracted via random sample. Highly recommended for human mode
-to avoid extracting millions of accounts. If the number of qualifying authors exceeds this cap,
-a random sample is taken. If not specified, all qualifying authors are kept.
-
-### 10. Random seed (`--seed`, default 42, Pass 1 only)
-Random seed for reproducibility when using `--max-authors`. Ensures the same sample is produced
-on re-runs.
-
-### 11. Output directory (`--output-dir`)
+### 9. Output directory (`--output-dir`)
 Directory where all output files are written. Created if it does not exist.
 
 ---
@@ -287,17 +276,6 @@ qualifying = {
     if count >= args.min_posts
 }
 
-# Apply max-authors cap via random sample if specified
-if args.max_authors and len(qualifying) > args.max_authors:
-    import random
-    random.seed(args.seed)
-    qualifying = set(random.sample(sorted(qualifying), args.max_authors))
-    stats["capped"] = True
-    stats["cap_reason"] = f"random sample (seed={args.seed})"
-else:
-    stats["capped"] = False
-    stats["cap_reason"] = "no cap applied"
-
 output_path = os.path.join(args.output_dir, f"pass1_authors_{file_type}_{period}.txt")
 with open(output_path, 'w') as f:
     for author in sorted(qualifying):
@@ -317,8 +295,6 @@ Skipped (skip list)      : 2,841,022
 Candidate authors found  : 8,204
 Below min-posts (< 3)    : 1,102
 Qualifying authors output: 7,102
-Capped                   : false
-Cap reason               : no cap applied
 Output file              : pass1_authors_comments_2024-01.txt
 Corrupted                : false
 Runtime                  : 6m 14s
@@ -663,7 +639,7 @@ python extract_bots_from_zst.py \
   --mode           bot \
   --output-dir     results/
 
-# Pass 1 (human mode - extracts non-bots, capped to 5000)
+# Pass 1 (human mode - extracts non-bots)
 python extract_bots_from_zst.py \
   --pass-num       1 \
   --zst-file       /data/reddit/RC_2024-01.zst \
@@ -672,8 +648,6 @@ python extract_bots_from_zst.py \
   --botrank-top-n  500 \
   --min-posts      3 \
   --mode           human \
-  --max-authors    5000 \
-  --seed           42 \
   --output-dir     results/
 
 # Pass 2 (mode-agnostic - works with bot or human author lists)
