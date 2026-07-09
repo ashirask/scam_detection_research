@@ -355,17 +355,6 @@ def run_pass1(args, zst_path, zst_name):
     }
     stats["below_min_posts"] = len(author_post_count) - len(qualifying)
     
-    # Apply max-authors cap via random sample if specified
-    if args.max_authors and len(qualifying) > args.max_authors:
-        import random
-        random.seed(args.seed)
-        qualifying = set(random.sample(sorted(qualifying), args.max_authors))
-        stats["capped"] = True
-        stats["cap_reason"] = f"random sample (seed={args.seed})"
-    else:
-        stats["capped"] = False
-        stats["cap_reason"] = "no cap applied"
-    
     # Write qualifying authors
     with open(output_authors, 'w', encoding='utf-8') as f:
         for author in sorted(qualifying):
@@ -381,8 +370,6 @@ def run_pass1(args, zst_path, zst_name):
         f"Candidate authors found  : {stats['candidate_authors']:,}",
         f"Below min-posts (< {args.min_posts})    : {stats['below_min_posts']:,}",
         f"Qualifying authors output: {len(qualifying):,}",
-        f"Capped                   : {stats['capped']}",
-        f"Cap reason               : {stats['cap_reason']}",
         f"Output file              : {output_authors}",
         f"Corrupted                : {corruption_detected}",
         f"Runtime                  : {format_runtime(runtime)}",
@@ -625,18 +612,6 @@ def main():
         choices=["bot", "human"],
         default="bot",
         help="Extraction mode: 'bot' (extract accounts matching bot rules) or 'human' (extract accounts NOT matching bot rules) (default: bot, Pass 1 only)",
-    )
-    parser.add_argument(
-        "--max-authors",
-        type=int,
-        default=None,
-        help="Cap total authors extracted via random sample (Pass 1 only, useful for human mode to avoid millions of results)",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for reproducibility when using --max-authors (default: 42)",
     )
     parser.add_argument(
         "--authors-file",
