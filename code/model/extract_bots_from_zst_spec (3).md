@@ -718,3 +718,11 @@ argparse      # stdlib
   - This ensures maximum data recovery while clearly distinguishing recoverable vs fatal errors
 - **Human extraction mode (`--mode human`)** inverts all bot detection rules to extract non-bot accounts.
   This enables balanced dataset creation without needing separate human extraction scripts.
+- **Rule C (text-based phrase matching) false positive consideration:** Rule C uses substring matching
+  to detect bot phrases in comment/submission text. This may occasionally match human users who
+  jokingly use bot phrases ("beep boop") or quote/reply to bot messages. Since the current logic
+  flags an author if ANY post matches ANY rule, a single bot phrase in one post can cause the entire
+  author to be classified as a bot. This is an accepted trade-off for comprehensive bot detection.
+  Human mode is unaffected by this limitation since it extracts accounts that DON'T match any rule.
+  If bot model accuracy is lower than expected, consider adding a threshold for Rule C (e.g.,
+  requiring bot phrases in ≥X% of posts rather than just one).
