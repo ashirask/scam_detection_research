@@ -229,8 +229,8 @@ def main():
         print(f"  Plot saved to: {plot_path}")
         plt.close()
     
-    # Get top-N domains by frequency (use target_n if it's smaller than --top-n)
-    effective_n = min(args.top_n, target_n) if target_n and target_n < args.top_n else args.top_n
+    # Get top-N domains by frequency (prioritize coverage target when achievable)
+    effective_n = target_n if target_n else args.top_n
     top_domains = [domain for domain, _ in sorted_domains[:effective_n]]
     
     # Write to output file (one domain per line)
