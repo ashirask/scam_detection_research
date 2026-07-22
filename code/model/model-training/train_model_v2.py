@@ -548,22 +548,79 @@ def train_models(MODELS, PREPROCESSING_DATA, y_train, y_val, artifact_dir, tune_
     return all_results
 
 
-def evaluate_test_set(MODELS, PREPROCESSING_DATA, all_results, y_test, artifact_dir):
+def save_test_predictions(model, X_test, y_test, df_test, model_name, threshold, output_dir):
+    """
+    Save test set predictions with author names for detailed analysis.
+    
+    Args:
+        model: Trained model with predict_proba method
+        X_test: Test features
+        y_test: Test labels
+        df_test: Original test DataFrame (to extract author names)
+        model_name: Name of the model
+        threshold: Decision threshold used
+        output_dir: Directory to save predictions
+    """
+    # Get probability predictions
+    y_proba = model.predict_proba(X_test)[:, 1]
+    
+    # Get binary predictions
+    y_pred = (y_proba >= threshold).astype(int)
+    
+    # Create results DataFrame
+    results = pd.DataFrame({
+        "author": df_test["author"].values,
+        "true_label": y_test.values,
+        "true_label_name": y_test.map({0: "human", 1: "bot"}).values,
+        "predicted_label": y_pred,
+        "predicted_label_name": pd.Series(y_pred).map({0: "human", 1: "bot"}).values,
+        "bot_probability": y_proba,
+        "model": model_name,
+        "threshold": threshold,
+        "correct": (y_test.values == y_pred),
+    })
+    
+    # Sort by bot probability (highest first)
+    results = results.sort_values("bot_probability", ascending=False)
+    
+    # Save to CSV
+    output_path = f"{output_dir}/test_predictions_{model_name}.csv"
+    results.to_csv(output_path, index=False)
+    print(f"Saved test predictions to {output_path}")
+    
+    # Print summary
+    print(f"\nTest Prediction Summary for {model_name}:")
+    print(f"Total samples: {len(results)}")
+    print(f"Correct predictions: {results['correct'].sum()} ({results['correct'].mean():.1%})")
+    print(f"False positives: {((results['true_label'] == 0) & (results['predicted_label'] == 1)).sum()}")
+    print(f"False negatives: {((results['true_label'] == 1) & (results['predicted_label'] == 0)).sum()}")
+    
+    return results
+
+
+def evaluate_test_set(MODELS, PREPROCESSING_DATA, all_results, y_test, df, artifact_dir, output_dir):
     """
     Evaluate all models on the held-out test set (run once at the end).
     Uses optimal threshold determined from validation set.
+    Saves detailed predictions with author names for analysis.
     
     Args:
         MODELS: Dictionary of model configurations
         PREPROCESSING_DATA: Dictionary of preprocessing variants
         all_results: Dictionary of existing results (will be updated)
         y_test: Test labels
+        df: Original DataFrame (to extract author names for test set)
         artifact_dir: Directory where trained models are saved
+        output_dir: Directory to save prediction details
     
     Returns:
         Updated all_results dictionary with test metrics
     """
     print(f"\n{'='*50}\nEvaluating on Test Set\n{'='*50}")
+    
+    # Get test indices from y_test (assuming it's a Series with index)
+    test_indices = y_test.index
+    df_test = df.loc[test_indices]
     
     for name, config in MODELS.items():
         # Get the appropriate preprocessing variant for this model
@@ -577,6 +634,9 @@ def evaluate_test_set(MODELS, PREPROCESSING_DATA, all_results, y_test, artifact_
         
         # Evaluate on test set with optimal threshold
         test_metrics = evaluate(model, Xte, y_test, name=f"{name}_TEST", threshold=optimal_threshold)
+        
+        # Save detailed predictions with author names
+        save_test_predictions(model, Xte, y_test, df_test, name, optimal_threshold, output_dir)
         
         # Store test metrics
         all_results[name]["test_metrics"] = test_metrics
@@ -994,7 +1054,7 @@ def main():
     
     # Step 7: Evaluate on test set
     print("\n[Step 7] Evaluating on test set...")
-    all_results = evaluate_test_set(MODELS, PREPROCESSING_DATA, all_results, y_test, args.artifact_dir)
+    all_results = evaluate_test_set(MODELS, PREPROCESSING_DATA, all_results, y_test, df, args.artifact_dir, args.output_dir)
     
     # Step 8: Generate visualizations
     if not args.skip_viz:
