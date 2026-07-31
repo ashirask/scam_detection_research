@@ -5,13 +5,15 @@ Lightweight merge script for Pass 1 author lists.
 Reads all pass1_authors_*.txt files from all months and file types,
 takes the set union, and writes a single deduplicated global author list.
 Supports optional capping via random sample for balanced bot:human ratio.
+Supports excluding previously selected authors to avoid duplicates.
 
 Usage:
   python merge_pass1_authors.py \
     --input-dir results/ \
     --output bot_authors_global.txt \
     --max-authors 5000 \
-    --seed 42
+    --seed 42 \
+    --exclude existing_authors.txt
 """
 
 import argparse
@@ -49,6 +51,13 @@ def main():
         default=42,
         help="Random seed for reproducibility (default: 42)"
     )
+    parser.add_argument(
+        "--exclude",
+        type=str,
+        default=None,
+        help="File containing authors to exclude (one per line). "
+             "These authors will be removed from the pool before sampling."
+    )
     
     args = parser.parse_args()
     
@@ -75,6 +84,22 @@ def main():
                     all_authors.add(username)
     
     print(f"\nTotal unique bot authors found: {len(all_authors)}")
+    
+    # Load and apply exclusion list if provided
+    if args.exclude:
+        exclude_path = Path(args.exclude)
+        if exclude_path.exists():
+            excluded_authors = set()
+            with open(exclude_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    username = line.strip()
+                    if username:
+                        excluded_authors.add(username)
+            print(f"Loaded {len(excluded_authors)} authors to exclude from {exclude_path}")
+            all_authors = all_authors - excluded_authors
+            print(f"After exclusion: {len(all_authors)} authors remaining")
+        else:
+            print(f"Warning: Exclude file {exclude_path} not found. No exclusion applied.")
     
     # Apply cap via simple random sample if requested
     random.seed(args.seed)
