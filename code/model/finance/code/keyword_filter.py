@@ -13,7 +13,7 @@ class KeywordMatch:
     subreddit: str
     matched_keywords: List[str]
     excluded_keywords: List[str]
-    score: float
+    keyword_count: int
     is_financial: bool
 
 
@@ -39,7 +39,7 @@ class KeywordFilter:
         }
         
         self.trading_keywords = {
-            'option', 'options', 'futures', 'forex', 'fx', 'commodity',
+            'futures', 'forex', 'fx', 'commodity',
             'commodities', 'etf', 'mutualfund'
         }
         
@@ -84,28 +84,19 @@ class KeywordFilter:
                 words.add(word)
         return words
     
-    def _calculate_score(self, matched_keywords: List[str], excluded_keywords: List[str]) -> float:
-        """Calculate relevance score based on keyword matches"""
-        if excluded_keywords:
-            # Heavy penalty for false positives
-            return 0.0
+    def filter_subreddit(self, subreddit: SubredditFull, use_description: bool = True) -> KeywordMatch:
+        """Filter a single subreddit based on keywords
         
-        if not matched_keywords:
-            return 0.0
+        Args:
+            subreddit: Subreddit to filter
+            use_description: If True, search description field; if False, only public_description
+        """
+        # Build text to search based on description flag
+        if use_description:
+            text_to_check = f"{subreddit.display_name} {subreddit.description} {subreddit.public_description}"
+        else:
+            text_to_check = f"{subreddit.display_name} {subreddit.public_description}"
         
-        # Base score from number of matches
-        score = min(len(matched_keywords) * 0.2, 1.0)
-        
-        # Bonus for high-value keywords
-        high_value = {'finance', 'financial', 'invest', 'investing', 'trading', 'crypto'}
-        if any(kw in matched_keywords for kw in high_value):
-            score = min(score + 0.3, 1.0)
-        
-        return score
-    
-    def filter_subreddit(self, subreddit: SubredditFull) -> KeywordMatch:
-        """Filter a single subreddit based on keywords"""
-        text_to_check = f"{subreddit.display_name} {subreddit.description} {subreddit.public_description}"
         words = self._extract_words(text_to_check)
         
         matched_keywords = []
@@ -118,33 +109,44 @@ class KeywordFilter:
             elif word in self.financial_keywords:
                 matched_keywords.append(word)
         
-        score = self._calculate_score(matched_keywords, excluded_keywords)
-        is_financial = score > 0.3 and not excluded_keywords
+        is_financial = len(matched_keywords) > 0 and not excluded_keywords
         
         return KeywordMatch(
             subreddit=subreddit.display_name,
             matched_keywords=matched_keywords,
             excluded_keywords=excluded_keywords,
-            score=score,
+            keyword_count=len(matched_keywords),
             is_financial=is_financial
         )
     
-    def filter_batch(self, subreddits: List[SubredditFull]) -> List[KeywordMatch]:
-        """Filter a batch of subreddits"""
+    def filter_batch(self, subreddits: List[SubredditFull], use_description: bool = True) -> List[KeywordMatch]:
+        """Filter a batch of subreddits
+        
+        Args:
+            subreddits: List of subreddits to filter
+            use_description: If True, search description field; if False, only public_description
+        """
         results = []
         for subreddit in subreddits:
-            result = self.filter_subreddit(subreddit)
+            result = self.filter_subreddit(subreddit, use_description)
             results.append(result)
         return results
     
-    def get_financial_subreddits(self, subreddits: List[SubredditFull], min_score: float = 0.3) -> List[SubredditFull]:
-        """Get only financial subreddits above threshold"""
-        matches = self.filter_batch(subreddits)
+    def get_financial_subreddits(self, subreddits: List[SubredditFull], min_keywords: int = 1, 
+                                 use_description: bool = True) -> List[SubredditFull]:
+        """Get only financial subreddits above keyword threshold
+        
+        Args:
+            subreddits: List of subreddits to filter
+            min_keywords: Minimum number of financial keywords required (default: 1)
+            use_description: If True, search description field; if False, only public_description
+        """
+        matches = self.filter_batch(subreddits, use_description)
         subreddit_dict = {s.display_name: s for s in subreddits}
         
         financial = []
         for match in matches:
-            if match.is_financial and match.score >= min_score:
+            if match.is_financial and match.keyword_count >= min_keywords:
                 financial.append(subreddit_dict[match.subreddit])
         
         return financial
