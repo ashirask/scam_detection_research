@@ -2,27 +2,34 @@
 Example usage of the financial subreddit extraction pipeline
 """
 
+import argparse
 from pipeline import FinancialSubredditPipeline
 from user_sampler import UserSampler, SamplingConfig
 from arctic_shift_client import ArcticShiftClient
 
 
-def example_basic_pipeline():
-    """Run basic pipeline without LLM (keyword-only)"""
-    # For large files (63GB+), use meta-only mode to save memory
-    # Set use_full_file=False to only load the 500MB meta file
-    # Set use_full_file=True to load both files (requires more memory)
+def example_basic_pipeline(min_keywords=1, use_description=True, use_full_file=False):
+    """Run basic pipeline with simplified filtering"""
+    # Parameters:
+    # min_posts: Minimum posts required (default: 1000)
+    # min_subscribers: Minimum subscribers required (default: 100)
+    # min_keywords: Minimum financial keywords required (default: 1)
+    # use_description: If True, search description field; if False, only public_description
+    # use_full_file: If False, only load meta file (memory efficient)
+    
     pipeline = FinancialSubredditPipeline(
         meta_file="subreddits_meta_only_2025-01",
         full_file="subreddits_2025-01",
         output_dir="output",
         min_posts=1000,
-        openai_api_key=None,  # No LLM
-        use_full_file=True   # Use meta-only for memory efficiency with large files
+        min_subscribers=100,
+        min_keywords=min_keywords,
+        use_description=use_description,
+        use_full_file=use_full_file
     )
     
-    # Run pipeline with keyword filtering only
-    financial_subs = pipeline.run_full_pipeline(skip_llm=True)
+    # Run pipeline
+    financial_subs = pipeline.run_full_pipeline()
     
     print(f"Found {len(financial_subs)} financial subreddits")
     return financial_subs
@@ -131,24 +138,48 @@ def example_manual_review():
 
 
 if __name__ == "__main__":
-    print("Choose an example to run:")
-    print("1. Basic pipeline (no LLM)")
-    print("2. Full pipeline with LLM")
-    print("3. User sampling")
-    print("4. Arctic Shift data extraction")
-    print("5. Manual review")
+    parser = argparse.ArgumentParser(description="Financial subreddit extraction pipeline")
+    parser.add_argument("--meta-file", type=str, default="subreddits_meta_only_2025-01",
+                       help="Path to meta-only subreddit file (default: subreddits_meta_only_2025-01)")
+    parser.add_argument("--full-file", type=str, default="subreddits_2025-01",
+                       help="Path to full subreddit file (default: subreddits_2025-01)")
+    parser.add_argument("--output-dir", type=str, default="output",
+                       help="Output directory (default: output)")
+    parser.add_argument("--min-posts", type=int, default=1000,
+                       help="Minimum posts required (default: 1000)")
+    parser.add_argument("--min-subscribers", type=int, default=100,
+                       help="Minimum subscribers required (default: 100)")
+    parser.add_argument("--min-keywords", type=int, default=1, 
+                       help="Minimum number of financial keywords required (default: 1)")
+    parser.add_argument("--use-description", action="store_true", default=True,
+                       help="Search description field (default: True)")
+    parser.add_argument("--no-description", action="store_false", dest="use_description",
+                       help="Do not search description field, only public_description")
+    parser.add_argument("--use-full-file", action="store_true", default=False,
+                       help="Load full data file instead of meta-only (default: False)")
     
-    choice = input("Enter choice (1-5): ").strip()
+    args = parser.parse_args()
     
-    if choice == "1":
-        example_basic_pipeline()
-    elif choice == "2":
-        example_with_llm()
-    elif choice == "3":
-        example_user_sampling()
-    elif choice == "4":
-        example_arctic_shift_extraction()
-    elif choice == "5":
-        example_manual_review()
-    else:
-        print("Invalid choice")
+    print(f"Running pipeline with:")
+    print(f"  Meta file: {args.meta_file}")
+    print(f"  Full file: {args.full_file}")
+    print(f"  Output directory: {args.output_dir}")
+    print(f"  Minimum posts: {args.min_posts}")
+    print(f"  Minimum subscribers: {args.min_subscribers}")
+    print(f"  Minimum keywords: {args.min_keywords}")
+    print(f"  Use description field: {args.use_description}")
+    print(f"  Use full file: {args.use_full_file}")
+    
+    pipeline = FinancialSubredditPipeline(
+        meta_file=args.meta_file,
+        full_file=args.full_file,
+        output_dir=args.output_dir,
+        min_posts=args.min_posts,
+        min_subscribers=args.min_subscribers,
+        min_keywords=args.min_keywords,
+        use_description=args.use_description,
+        use_full_file=args.use_full_file
+    )
+    
+    financial_subs = pipeline.run_full_pipeline()
+    print(f"Found {len(financial_subs)} financial subreddits")
