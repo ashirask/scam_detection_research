@@ -33,7 +33,9 @@ class FinancialSubredditPipeline:
     def __init__(self, meta_file: str, full_file: str, 
                  output_dir: str = "output",
                  min_posts: int = 1000,
-                 openai_api_key: Optional[str] = None,
+                 min_subscribers: int = 100,
+                 min_keywords: int = 1,
+                 use_description: bool = True,
                  use_full_file: bool = True):
         
         self.meta_file = meta_file
@@ -42,20 +44,20 @@ class FinancialSubredditPipeline:
         self.output_dir.mkdir(exist_ok=True)
         
         self.min_posts = min_posts
-        self.openai_api_key = openai_api_key
+        self.min_subscribers = min_subscribers
+        self.min_keywords = min_keywords
+        self.use_description = use_description
         self.use_full_file = use_full_file
         
         # Initialize components
         self.loader = SubredditDataLoader(meta_file, full_file)
         self.keyword_filter = KeywordFilter()
         self.filter_rank = FilterRank(config.KNOWN_FINANCIAL_SUBREDDITS)
-        self.manual_review = ManualReview(str(self.output_dir / "review_results.json"))
         
         # Results storage
         self.all_subreddits: List[SubredditFull] = []
         self.filtered_subreddits: List[SubredditFull] = []
         self.keyword_matches: List[KeywordMatch] = []
-        self.llm_annotations: List[LLMAnnotation] = []
         self.ranked_subreddits: List[RankedSubreddit] = []
         self.final_subreddits: List[str] = []
     
@@ -69,11 +71,11 @@ class FinancialSubredditPipeline:
         logger.info(f"Loaded {len(self.all_subreddits)} subreddits")
         
         # Apply activity filters
-        logger.info(f"Filtering by min_posts={self.min_posts}, min_subscribers={config.MIN_SUBSCRIBERS}")
+        logger.info(f"Filtering by min_posts={self.min_posts}, min_subscribers={self.min_subscribers}")
         self.filtered_subreddits = self.filter_rank.filter_by_activity(
             self.all_subreddits,
             min_posts=self.min_posts,
-            min_subscribers=config.MIN_SUBSCRIBERS
+            min_subscribers=self.min_subscribers
         )
         
         logger.info(f"After filtering: {len(self.filtered_subreddits)} subreddits")
@@ -86,13 +88,19 @@ class FinancialSubredditPipeline:
     def stage2_keyword_matching(self, subreddits: List[SubredditFull]) -> List[SubredditFull]:
         """Stage 2: Keyword-based filtering"""
         logger.info("Stage 2: Keyword-based filtering")
+        logger.info(f"Using description field: {self.use_description}")
+        logger.info(f"Minimum keywords required: {self.min_keywords}")
         
         # Apply keyword filter
         logger.info("Matching financial keywords...")
-        self.keyword_matches = self.keyword_filter.filter_batch(subreddits)
+        self.keyword_matches = self.keyword_filter.filter_batch(subreddits, self.use_description)
         
         # Get financial subreddits
-        financial_subs = self.keyword_filter.get_financial_subreddits(subreddits, min_score=0.3)
+        financial_subs = self.keyword_filter.get_financial_subreddits(
+            subreddits, 
+            min_keywords=self.min_keywords,
+            use_description=self.use_description
+        )
         
         logger.info(f"Found {len(financial_subs)} potentially financial subreddits")
         
@@ -102,43 +110,13 @@ class FinancialSubredditPipeline:
         
         return financial_subs
     
-    def stage3_llm_annotation(self, subreddits: List[SubredditFull]) -> List[LLMAnnotation]:
-        """Stage 3: LLM-based semantic analysis"""
-        if not self.openai_api_key:
-            logger.info("Stage 3: Skipping LLM annotation (no API key provided)")
-            return []
-        
-        logger.info("Stage 3: LLM-based semantic analysis")
-        
-        annotator = LLMAnnotator(
-            api_key=self.openai_api_key,
-            model=config.LLM_MODEL,
-            temperature=config.LLM_TEMPERATURE
-        )
-        
-        logger.info(f"Annotating {len(subreddits)} subreddits with LLM...")
-        self.llm_annotations = annotator.annotate_batch(
-            subreddits, 
-            batch_size=config.LLM_BATCH_SIZE
-        )
-        
-        # Save annotations
-        self._save_llm_annotations()
-        
-        # Get high-confidence financial subreddits
-        high_conf = annotator.filter_by_confidence(self.llm_annotations, min_confidence=0.7)
-        logger.info(f"High-confidence financial subreddits: {len(high_conf)}")
-        
-        return self.llm_annotations
-    
-    def stage4_ranking(self, subreddits: List[SubredditFull]) -> List[RankedSubreddit]:
-        """Stage 4: Combine scores and rank"""
-        logger.info("Stage 4: Ranking subreddits by combined score")
+    def stage3_ranking(self, subreddits: List[SubredditFull]) -> List[RankedSubreddit]:
+        """Stage 3: Rank subreddits by keyword count and subscribers"""
+        logger.info("Stage 3: Ranking subreddits by keyword count and subscribers")
         
         self.ranked_subreddits = self.filter_rank.rank_subreddits(
             subreddits,
-            self.keyword_matches,
-            self.llm_annotations
+            self.keyword_matches
         )
         
         logger.info(f"Ranked {len(self.ranked_subreddits)} subreddits")
@@ -192,7 +170,7 @@ class FinancialSubredditPipeline:
         
         return report
     
-    def run_full_pipeline(self, skip_llm: bool = False) -> List[str]:
+    def run_full_pipeline(self) -> List[str]:
         """Run complete pipeline"""
         logger.info("="*60)
         logger.info("FINANCIAL SUBREDDIT EXTRACTION PIPELINE")
@@ -204,23 +182,11 @@ class FinancialSubredditPipeline:
         # Stage 2: Keyword matching
         keyword_matched = self.stage2_keyword_matching(filtered)
         
-        # Stage 3: LLM annotation
-        if not skip_llm and self.openai_api_key:
-            self.stage3_llm_annotation(keyword_matched)
-        else:
-            logger.info("Skipping LLM annotation")
-            # Create dummy annotations
-            self.llm_annotations = []
+        # Stage 3: Ranking
+        ranked = self.stage3_ranking(keyword_matched)
         
-        # Stage 4: Ranking
-        ranked = self.stage4_ranking(keyword_matched)
-        
-        # Filter by combined score
-        high_ranked = self.filter_rank.filter_by_threshold(ranked, min_score=0.5)
-        logger.info(f"High-ranked subreddits (score >= 0.5): {len(high_ranked)}")
-        
-        # Get final list
-        self.final_subreddits = [r.subreddit.display_name for r in high_ranked]
+        # Get final list (all ranked subreddits pass the keyword threshold)
+        self.final_subreddits = [r.subreddit.display_name for r in ranked]
         
         # Save final results
         self._save_final_results()
@@ -246,7 +212,7 @@ class FinancialSubredditPipeline:
                 "subreddit": km.subreddit,
                 "matched_keywords": km.matched_keywords,
                 "excluded_keywords": km.excluded_keywords,
-                "score": km.score,
+                "keyword_count": km.keyword_count,
                 "is_financial": km.is_financial
             }
             for km in self.keyword_matches
@@ -276,11 +242,9 @@ class FinancialSubredditPipeline:
             {
                 "rank": r.rank,
                 "subreddit": r.subreddit.display_name,
-                "subscribers": r.subreddit.subscribers,
-                "num_posts": r.subreddit.num_posts,
-                "keyword_score": r.keyword_score,
-                "llm_confidence": r.llm_confidence,
-                "combined_score": r.combined_score,
+                "subscribers": r.subscribers,
+                "num_posts": r.num_posts,
+                "keyword_count": r.keyword_count,
                 "is_known_financial": r.is_known_financial
             }
             for r in self.ranked_subreddits
@@ -298,21 +262,3 @@ class FinancialSubredditPipeline:
         data = [u.__dict__ for u in users]
         with open(self.output_dir / "sampled_users.json", 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-
-
-if __name__ == "__main__":
-    # Example usage
-    pipeline = FinancialSubredditPipeline(
-        meta_file="subreddits_meta_only_2025-01",
-        full_file="subreddits_2025-01",
-        output_dir="output",
-        min_posts=1000,
-        openai_api_key=None  # Set your API key here
-    )
-    
-    # Run full pipeline
-    financial_subs = pipeline.run_full_pipeline(skip_llm=True)
-    
-    print(f"\nFinal financial subreddits ({len(financial_subs)}):")
-    for sub in financial_subs[:20]:  # Print first 20
-        print(f"  - r/{sub}")
