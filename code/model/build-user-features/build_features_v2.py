@@ -151,15 +151,16 @@ def build_comment_lookup_sqlite(comments_bot_path, comments_human_path,
         Path to SQLite database file
     """
     if db_path is None:
-        # Create temporary database
+        # Create temporary database if no path specified
         db_path = tempfile.mktemp(suffix='.db')
     
     logger = logging.getLogger(__name__)
     
     # Check if database already exists and skip rebuilding
+    # This saves time if you run the script multiple times
     if Path(db_path).exists():
         logger.info(f"Using existing SQLite comment lookup at {db_path}")
-        # Verify database has data
+        # Verify database has data by counting rows
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         cursor.execute('SELECT COUNT(*) FROM comments')
@@ -171,10 +172,12 @@ def build_comment_lookup_sqlite(comments_bot_path, comments_human_path,
     logger.info(f"Building SQLite comment lookup at {db_path}")
     
     # Create SQLite database with optimized schema
+    # Think of this as creating a new Excel file with columns
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
     # Create table with appropriate indexes
+    # Table structure: comment_id (unique) + timestamp
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS comments (
             id TEXT PRIMARY KEY,
@@ -183,71 +186,118 @@ def build_comment_lookup_sqlite(comments_bot_path, comments_human_path,
     ''')
     
     # Use WAL mode for better concurrent performance
+    # WAL = Write-Ahead Log (faster, safer way to write data)
     cursor.execute('PRAGMA journal_mode=WAL')
     cursor.execute('PRAGMA synchronous=NORMAL')
+    cursor.execute('PRAGMA cache_size=-64000')  # 64MB cache (keeps more data in RAM)
+    cursor.execute('PRAGMA temp_store=MEMORY')  # Use RAM for temp tables (faster than disk)
     
     # Function to insert comments from a file
+    # This is the core function that reads data and adds it to the database
     def insert_comments_from_file(path, source_name):
-        count = 0
-        batch = []
-        batch_size = 10000
+        # Validate file exists and is readable
+        path_obj = Path(path)
+        if not path_obj.exists():
+            logger.warning(f"  File not found: {path}, skipping")
+            return 0
         
-        for record in stream_jsonl(path):
-            # Handle different file formats
-            if "comments" in record:
-                # Format: {"author": "...", "comments": [...]}
-                comments = record.get("comments", [])
-            else:
-                # Format: single comment records
-                comments = [record]
+        file_size_gb = path_obj.stat().st_size / 1024 / 1024 / 1024
+        logger.info(f"  Processing {source_name} ({file_size_gb:.1f} GB)...")
+        
+        count = 0  # Track total records processed
+        batch = []  # Temporary storage for records before writing to DB
+        batch_size = 500000  # Process 500K records at a time (faster than 1-by-1)
+        last_log_count = 0  # Track when we last logged progress
+        log_interval = 1000000  # Log progress every 1M records
+        commit_interval = 2000000  # Save to disk every 2M records (prevents slowdown)
+        
+        try:
+            # Read the file line by line (streaming - doesn't load entire file into RAM)
+            for record in stream_jsonl(path):
+                # Handle different file formats
+                if "comments" in record:
+                    # Format: {"author": "...", "comments": [...]}
+                    # Extract the list of comments from the record
+                    comments = record.get("comments", [])
+                else:
+                    # Format: single comment records (each line is one comment)
+                    comments = [record]
+                
+                # Process each comment individually
+                for comment in comments:
+                    cid = comment.get("id")  # Get comment ID
+                    ts = comment.get("created_utc")  # Get timestamp
+                    if cid and ts is not None:
+                        # Add to batch (temporary storage)
+                        batch.append((str(cid), float(ts)))
+                        count += 1
+                        
+                        # When batch reaches 500K records, write to database
+                        if len(batch) >= batch_size:
+                            cursor.executemany(
+                                'INSERT OR REPLACE INTO comments (id, created_utc) VALUES (?, ?)',
+                                batch
+                            )
+                            batch = []  # Clear batch for next set
+                        
+                        # Progress logging and periodic commit
+                        if count - last_log_count >= log_interval:
+                            logger.info(f"    Inserted {count:,} comments...")
+                            last_log_count = count
+                            
+                            # Commit periodically to prevent WAL from growing too large
+                            # This saves data to disk and clears the temporary WAL file
+                            if count % commit_interval == 0:
+                                conn.commit()  # Save changes to disk
+                                # Checkpoint WAL to keep file size manageable
+                                cursor.execute('PRAGMA wal_checkpoint(TRUNCATE)')
             
-            for comment in comments:
-                cid = comment.get("id")
-                ts = comment.get("created_utc")
-                if cid and ts is not None:
-                    batch.append((str(cid), float(ts)))
-                    count += 1
-                    
-                    if len(batch) >= batch_size:
-                        cursor.executemany(
-                            'INSERT OR REPLACE INTO comments (id, created_utc) VALUES (?, ?)',
-                            batch
-                        )
-                        conn.commit()
-                        batch = []
-        
-        # Insert remaining batch
-        if batch:
-            cursor.executemany(
-                'INSERT OR REPLACE INTO comments (id, created_utc) VALUES (?, ?)',
-                batch
-            )
+            # Insert remaining batch (records that didn't fill a complete batch)
+            if batch:
+                cursor.executemany(
+                    'INSERT OR REPLACE INTO comments (id, created_utc) VALUES (?, ?)',
+                    batch
+                )
+                batch = []  # Clear the batch
+            
+            # Final commit to ensure all data is saved to disk
             conn.commit()
-        
-        logger.info(f"  Inserted {count:,} comments from {source_name}")
-        return count
+            # Final WAL checkpoint to clean up temporary files
+            cursor.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            logger.info(f"  Inserted {count:,} comments from {source_name}")
+            return count
+            
+        except Exception as e:
+            # Rollback on error (undo any changes if something goes wrong)
+            conn.rollback()
+            logger.error(f"  Error processing {source_name}: {e}")
+            raise
     
     # Insert comments from all sources
+    # Process each file and add all comments to the database
     total = 0
-    total += insert_comments_from_file(comments_bot_path, "bot comments")
-    total += insert_comments_from_file(comments_human_path, "human comments")
+    #total += insert_comments_from_file(comments_bot_path, "bot comments")
+    #total += insert_comments_from_file(comments_human_path, "human comments")
     
     if parent_comments_path:
         total += insert_comments_from_file(parent_comments_path, "parent comments")
+    else:
+        logger.warning("  No parent comments file provided - temporal features will have limited coverage")
     
     # Create index for faster lookups
+    # Index is like a table of contents - makes searching much faster
     logger.info("  Creating index...")
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_created_utc ON comments(created_utc)')
     conn.commit()
     
-    # Optimize database
+    # Optimize database (reorganizes data for better performance)
     cursor.execute('PRAGMA optimize')
-    conn.close()
+    conn.close()  # Close the database connection
     
     logger.info(f"  Total comments in lookup: {total:,}")
     logger.info(f"  Database size: {Path(db_path).stat().st_size / 1024 / 1024:.1f} MB")
     
-    return db_path
+    return db_path  # Return path so other functions can use this database
 
 
 class SQLiteConnectionPool:
