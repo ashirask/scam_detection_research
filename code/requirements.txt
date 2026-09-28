@@ -12,3 +12,8 @@ orjson>=3.8.0
 networkx>=2.6.0
 zstandard>=0.18.0
 pyarrow>=10.0.0
+openpyxl>=3.0.0
+# Graph Neural Network dependencies for graph pipeline extension
+torch-geometric>=2.3.0
+python-igraph>=0.10.0
+leidenalg>=0.10.0
